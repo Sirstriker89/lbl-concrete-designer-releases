@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       release_id:
-        description: Draft GitHub release ID containing the installer asset
+        description: Exact GitHub release ID containing the installer asset
         required: true
         type: string
       asset_id:
-        description: Exact draft installer asset ID
+        description: Exact installer asset ID belonging to the selected release
         required: true
         type: string
       version:
@@ -39,7 +39,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - name: Download and authenticate the exact draft asset
+      - name: Authenticate asset, install, launch, uninstall, and write evidence
+        id: smoke
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -47,35 +48,145 @@ jobs:
           ASSET_ID: ${{ inputs.asset_id }}
           EXPECTED_VERSION: ${{ inputs.version }}
           EXPECTED_SHA256: ${{ inputs.sha256 }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:EXPECTED_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Version input is not exact SemVer.' }
-          if ($env:EXPECTED_SHA256 -notmatch '^[A-Fa-f0-9]{64}$') { throw 'SHA-256 input is invalid.' }
-          if ($env:ASSET_ID -notmatch '^\d+$') { throw 'Draft asset ID is invalid.' }
-          $apiHeaders = @{
-            Authorization = "Bearer $env:GH_TOKEN"
-            Accept = 'application/vnd.github+json'
-            'X-GitHub-Api-Version' = '2022-11-28'
-            'User-Agent' = 'LBL-Concrete-Designer-Installer-Smoke'
-          }
-          $assetName = "LBL-Concrete-Designer-Setup-$env:EXPECTED_VERSION.exe"
-          $asset = Invoke-RestMethod -Headers $apiHeaders -Uri "https://api.github.com/repos/${{ github.repository }}/releases/assets/$env:ASSET_ID"
-          if ($asset.name -cne $assetName -or $asset.state -cne 'uploaded') { throw "Draft asset identity mismatch for $assetName." }
-          $installerPath = Join-Path $env:RUNNER_TEMP $assetName
-          $downloadHeaders = $apiHeaders.Clone()
-          $downloadHeaders.Accept = 'application/octet-stream'
-          Invoke-WebRequest -Headers $downloadHeaders -Uri "https://api.github.com/repos/${{ github.repository }}/releases/assets/$env:ASSET_ID" -OutFile $installerPath
-          $actualHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToUpperInvariant()
-          if ($actualHash -cne $env:EXPECTED_SHA256.ToUpperInvariant()) { throw "Downloaded installer SHA-256 mismatch: $actualHash" }
-          "INSTALLER_PATH=$installerPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Install, launch, and uninstall
-        shell: pwsh
-        env:
           DESTINATION_KIND: ${{ inputs.destination }}
-          EXPECTED_VERSION: ${{ inputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+
+          $reportPath = Join-Path $env:RUNNER_TEMP 'installer-smoke-result.json'
+          $report = [ordered]@{
+            schemaVersion = 1
+            product = 'LBL Concrete Designer'
+            generatedAtUtc = [DateTime]::UtcNow.ToString('o')
+            completedAtUtc = $null
+            repository = $env:GITHUB_REPOSITORY
+            workflow = [ordered]@{
+              runId = [long]$env:GITHUB_RUN_ID
+              runAttempt = [int]$env:GITHUB_RUN_ATTEMPT
+              job = $env:GITHUB_JOB
+              workflowHeadSha = $env:GITHUB_SHA
+              sourceCommitBindingClaimed = $false
+            }
+            runner = [ordered]@{
+              os = $env:RUNNER_OS
+              arch = $env:RUNNER_ARCH
+              imageOs = $env:ImageOS
+              imageVersion = $env:ImageVersion
+              powerShellVersion = $PSVersionTable.PSVersion.ToString()
+              dDrivePresent = Test-Path -LiteralPath 'D:\'
+              dDriveType = $null
+            }
+            destination = [ordered]@{
+              kind = $env:DESTINATION_KIND
+              installRoot = $null
+              applicationPath = $null
+              oppositeRoot = $null
+              cDefaultRoot = Join-Path $env:LOCALAPPDATA 'Programs\LBL Concrete Designer'
+              dCustomRoot = 'D:\LBL Apps\LBL Concrete Designer'
+              cDefaultRootExistedBefore = $null
+              dCustomRootExistedBefore = $null
+              oppositeRootAbsentAfterInstall = $false
+            }
+            release = [ordered]@{
+              inputId = $env:RELEASE_ID
+              id = $null
+              tagName = $null
+              draft = $null
+              prerelease = $null
+              targetCommitish = $null
+              assetPagesInspected = 0
+              assetsInspected = 0
+            }
+            asset = [ordered]@{
+              inputId = $env:ASSET_ID
+              id = $null
+              name = $null
+              bytes = $null
+              downloadedBytes = $null
+              sizeMatched = $false
+              state = $null
+              apiUrl = $null
+            }
+            version = [ordered]@{
+              expected = $env:EXPECTED_VERSION
+              productVersion = $null
+              matched = $false
+            }
+            hash = [ordered]@{
+              algorithm = 'SHA-256'
+              expected = $env:EXPECTED_SHA256.ToUpperInvariant()
+              actual = $null
+              matched = $false
+            }
+            paths = [ordered]@{
+              downloadedInstaller = $null
+              installRoot = $null
+              applicationExecutable = $null
+              uninstaller = $null
+              discoveredApplicationsAfterInstall = @()
+            }
+            install = [ordered]@{
+              attempted = $false
+              exitCode = $null
+              processExitedZero = $false
+              payloadAndRegistrationVerified = $false
+              completed = $false
+            }
+            registry = [ordered]@{
+              exactEntriesBeforeInstall = $null
+              exactEntriesAfterInstall = $null
+              recordedInstallLocation = $null
+              installLocationMatched = $false
+              uninstallString = $null
+              quietUninstallString = $null
+              registeredUninstallerExecutable = $null
+              registeredQuietArguments = @()
+              registeredUninstallerMatched = $false
+              exactEntriesAfterUninstall = $null
+            }
+            launch = [ordered]@{
+              scope = 'process-liveness-only-no-visible-ui-assertion'
+              attempted = $false
+              smokeSeconds = 8
+              exactProcessCount = 0
+              remainedAliveDuringSmoke = $false
+              earlyExitCode = $null
+              stoppedProcessCount = 0
+              exactProcessesAfterStop = $null
+            }
+            uninstall = [ordered]@{
+              attempted = $false
+              exitCode = $null
+              processExitedZero = $false
+              cleanupVerified = $false
+              completed = $false
+            }
+            cleanup = [ordered]@{
+              applicationExecutableAbsent = $false
+              installRootAbsent = $false
+              uninstallRegistryAbsent = $false
+              applicationProcessesAbsent = $false
+            }
+            failureCleanup = [ordered]@{
+              eligible = $false
+              attempted = $false
+              applicationPathsBefore = @()
+              stoppedProcessIds = @()
+              uninstallAttempts = @()
+              applicationPathsAfter = @()
+              exactRegistryEntriesAfter = $null
+              cDefaultRootAbsentAfter = $null
+              dCustomRootAbsentAfter = $null
+              errors = @()
+            }
+            failure = $null
+            ok = $false
+          }
+
+          function Save-SmokeReport {
+            $json = $script:report | ConvertTo-Json -Depth 12
+            [IO.File]::WriteAllText($script:reportPath, "$json`n", [Text.UTF8Encoding]::new($false))
+          }
 
           function Invoke-BoundedProcess {
             param(
@@ -87,6 +198,8 @@ jobs:
             $start = [Diagnostics.ProcessStartInfo]::new()
             $start.FileName = $FilePath
             $start.UseShellExecute = $false
+            $start.CreateNoWindow = $true
+            $start.WorkingDirectory = $env:RUNNER_TEMP
             if (-not [String]::IsNullOrWhiteSpace($VerbatimArguments)) {
               $start.Arguments = $VerbatimArguments
             } else {
@@ -97,79 +210,401 @@ jobs:
               try { $process.Kill($true) } catch { }
               throw "Process timed out: $FilePath"
             }
-            if ($process.ExitCode -ne 0) { throw "Process exited with $($process.ExitCode): $FilePath" }
+            return [pscustomobject]@{ ExitCode = [int]$process.ExitCode }
           }
 
-          if ($env:DESTINATION_KIND -ceq 'c-default') {
-            $installRoot = Join-Path $env:LOCALAPPDATA 'Programs\LBL Concrete Designer'
-            $installerArguments = @('/S')
-            $installerVerbatimArguments = ''
-          } elseif ($env:DESTINATION_KIND -ceq 'd-custom') {
-            $installRoot = 'D:\LBL Apps\LBL Concrete Designer'
-            $installerArguments = @()
-            # NSIS requires /D= to be the final raw parameter with no quotes,
-            # even when the absolute path contains spaces.
-            $installerVerbatimArguments = "/S /D=$installRoot"
-          } else {
-            throw "Unknown destination matrix value: $env:DESTINATION_KIND"
-          }
-
-          if (Test-Path -LiteralPath $installRoot) { throw "Install root unexpectedly exists before QA: $installRoot" }
-          Invoke-BoundedProcess -FilePath $env:INSTALLER_PATH -Arguments $installerArguments -VerbatimArguments $installerVerbatimArguments
-
-          $namedUninstallEntries = @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayName -ceq 'LBL Concrete Designer' })
-          Write-Host "Exact uninstall entries after install: $($namedUninstallEntries.Count)"
-          foreach ($entry in $namedUninstallEntries) {
-            Write-Host "InstallLocation='$([string]$entry.InstallLocation)' DisplayIcon='$([string]$entry.DisplayIcon)' UninstallString='$([string]$entry.UninstallString)'"
-          }
-
-          $applicationPath = Join-Path $installRoot 'LBL Concrete Designer.exe'
-          if (-not (Test-Path -LiteralPath $applicationPath -PathType Leaf)) {
-            $diagnosticRoots = @((Join-Path $env:LOCALAPPDATA 'Programs'), 'D:\LBL Apps') | Where-Object { Test-Path -LiteralPath $_ -PathType Container }
-            $foundApplications = @($diagnosticRoots | ForEach-Object {
-              Get-ChildItem -LiteralPath $_ -Filter 'LBL Concrete Designer.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
-            })
-            Write-Host "Designer executables found under expected parent roots: $($foundApplications -join '; ')"
-            throw "Installed application is missing: $applicationPath"
-          }
-          $application = Get-Item -LiteralPath $applicationPath
-          if (-not $application.VersionInfo.ProductVersion.StartsWith($env:EXPECTED_VERSION, [StringComparison]::Ordinal)) {
-            throw "Installed ProductVersion is $($application.VersionInfo.ProductVersion), expected $env:EXPECTED_VERSION."
-          }
-
-          if ($namedUninstallEntries.Count -ne 1) { throw "Expected one exact uninstall entry, found $($namedUninstallEntries.Count)." }
-          $recordedInstallLocation = [string]$namedUninstallEntries[0].InstallLocation
-          if (-not [String]::IsNullOrWhiteSpace($recordedInstallLocation) -and
-            [IO.Path]::GetFullPath($recordedInstallLocation).TrimEnd('\') -ine [IO.Path]::GetFullPath($installRoot).TrimEnd('\')) {
-            throw "Uninstall entry points to a different install root: $recordedInstallLocation"
-          }
-
-          $launch = [Diagnostics.ProcessStartInfo]::new()
-          $launch.FileName = $applicationPath
-          $launch.UseShellExecute = $false
-          [void]$launch.ArgumentList.Add('--disable-gpu')
-          $applicationProcess = [Diagnostics.Process]::Start($launch)
-          Start-Sleep -Seconds 8
-          if ($applicationProcess.HasExited -and $applicationProcess.ExitCode -ne 0) {
-            throw "Installed application exited early with $($applicationProcess.ExitCode)."
-          }
-          $running = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -ieq [IO.Path]::GetFullPath($applicationPath) })
-          if ($running.Count -lt 1) { throw 'No installed application process remained alive for the smoke interval.' }
-          foreach ($entry in $running) { Stop-Process -Id $entry.ProcessId -Force -ErrorAction SilentlyContinue }
-          Start-Sleep -Seconds 2
-
-          $uninstaller = @(Get-ChildItem -LiteralPath $installRoot -Filter 'Uninstall*.exe' -File)
-          if ($uninstaller.Count -ne 1) { throw "Expected exactly one uninstaller, found $($uninstaller.Count)." }
-          Invoke-BoundedProcess -FilePath $uninstaller[0].FullName -Arguments @('/S')
-          $deadline = [DateTime]::UtcNow.AddSeconds(30)
-          do {
-            $remainingEntries = @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
+          function Get-ExactUninstallEntries {
+            return @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
               Where-Object { $_.DisplayName -ceq 'LBL Concrete Designer' })
-            if (-not (Test-Path -LiteralPath $applicationPath) -and $remainingEntries.Count -eq 0) { break }
-            Start-Sleep -Milliseconds 250
-          } while ([DateTime]::UtcNow -lt $deadline)
-          if (Test-Path -LiteralPath $applicationPath) { throw 'Application executable remains after silent uninstall.' }
-          if ($remainingEntries.Count -ne 0) { throw 'Uninstall registry entry remains after silent uninstall.' }
+          }
 
-          "Installer smoke passed for $env:DESTINATION_KIND at $installRoot" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          function Get-ExactApplicationProcesses {
+            param([Parameter(Mandatory = $true)][string]$ApplicationPath)
+            return @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+              $_.ExecutablePath -and
+              [IO.Path]::GetFullPath($_.ExecutablePath) -ieq [IO.Path]::GetFullPath($ApplicationPath)
+            })
+          }
+
+          function Get-KnownApplicationPaths {
+            $knownPaths = @(
+              (Join-Path $script:report.destination.cDefaultRoot 'LBL Concrete Designer.exe'),
+              (Join-Path $script:report.destination.dCustomRoot 'LBL Concrete Designer.exe')
+            )
+            return @($knownPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+          }
+
+          function Split-RegisteredCommand {
+            param([Parameter(Mandatory = $true)][string]$Command)
+            if (-not $Command.StartsWith('"', [StringComparison]::Ordinal)) {
+              throw 'Registered uninstall command must quote its executable path.'
+            }
+            $closingQuote = $Command.IndexOf('"', 1)
+            if ($closingQuote -le 1) { throw 'Registered uninstall command has invalid quoting.' }
+            $executable = $Command.Substring(1, $closingQuote - 1)
+            $argumentText = $Command.Substring($closingQuote + 1).Trim()
+            $arguments = if ([String]::IsNullOrWhiteSpace($argumentText)) {
+              @()
+            } else {
+              @($argumentText -split '\s+' | Where-Object { -not [String]::IsNullOrWhiteSpace($_) })
+            }
+            return [pscustomobject]@{
+              Executable = $executable
+              Arguments = $arguments
+              ArgumentText = $argumentText
+            }
+          }
+
+          function Invoke-BestEffortFailureCleanup {
+            $script:report.failureCleanup.eligible = $script:cleanRootsConfirmed
+            if (-not $script:cleanRootsConfirmed) { return }
+            $script:report.failureCleanup.attempted = $true
+            $errors = [Collections.Generic.List[string]]::new()
+            $stoppedProcessIds = [Collections.Generic.List[int]]::new()
+            $uninstallAttempts = [Collections.Generic.List[object]]::new()
+            $applicationPathsBefore = @(Get-KnownApplicationPaths)
+            $script:report.failureCleanup.applicationPathsBefore = $applicationPathsBefore
+
+            foreach ($applicationPath in $applicationPathsBefore) {
+              try {
+                foreach ($process in @(Get-ExactApplicationProcesses -ApplicationPath $applicationPath)) {
+                  Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+                  $stoppedProcessIds.Add([int]$process.ProcessId)
+                }
+              } catch {
+                $errors.Add("process cleanup for '$applicationPath': $($_.Exception.Message)")
+              }
+            }
+            $script:report.failureCleanup.stoppedProcessIds = @($stoppedProcessIds)
+
+            foreach ($root in @($script:report.destination.cDefaultRoot, $script:report.destination.dCustomRoot)) {
+              if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+              foreach ($candidate in @(Get-ChildItem -LiteralPath $root -Filter 'Uninstall*.exe' -File -ErrorAction SilentlyContinue)) {
+                $attempt = [ordered]@{ path = $candidate.FullName; exitCode = $null; error = $null }
+                try {
+                  $result = Invoke-BoundedProcess -FilePath $candidate.FullName -Arguments @('/S') -TimeoutMilliseconds 120000
+                  $attempt.exitCode = $result.ExitCode
+                } catch {
+                  $attempt.error = $_.Exception.Message
+                  $errors.Add("uninstaller cleanup for '$($candidate.FullName)': $($_.Exception.Message)")
+                }
+                $uninstallAttempts.Add([pscustomobject]$attempt)
+              }
+            }
+            $script:report.failureCleanup.uninstallAttempts = @($uninstallAttempts)
+
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            do {
+              $applicationPathsAfter = @(Get-KnownApplicationPaths)
+              $entriesAfter = @(Get-ExactUninstallEntries)
+              $cAbsent = -not (Test-Path -LiteralPath $script:report.destination.cDefaultRoot)
+              $dAbsent = -not (Test-Path -LiteralPath $script:report.destination.dCustomRoot)
+              if ($applicationPathsAfter.Count -eq 0 -and $entriesAfter.Count -eq 0 -and $cAbsent -and $dAbsent) { break }
+              Start-Sleep -Milliseconds 250
+            } while ([DateTime]::UtcNow -lt $deadline)
+
+            $script:report.failureCleanup.applicationPathsAfter = $applicationPathsAfter
+            $script:report.failureCleanup.exactRegistryEntriesAfter = $entriesAfter.Count
+            $script:report.failureCleanup.cDefaultRootAbsentAfter = $cAbsent
+            $script:report.failureCleanup.dCustomRootAbsentAfter = $dAbsent
+            $script:report.failureCleanup.errors = @($errors)
+          }
+
+          Save-SmokeReport
+          $cleanRootsConfirmed = $false
+          $stage = 'validate-inputs'
+          try {
+            if ($env:RELEASE_ID -notmatch '^\d+$') { throw 'Release ID is invalid.' }
+            if ($env:ASSET_ID -notmatch '^\d+$') { throw 'Asset ID is invalid.' }
+            if ($env:EXPECTED_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Version input is not exact SemVer.' }
+            if ($env:EXPECTED_SHA256 -notmatch '^[A-Fa-f0-9]{64}$') { throw 'SHA-256 input is invalid.' }
+            $report.release.id = [long]$env:RELEASE_ID
+            $report.asset.id = [long]$env:ASSET_ID
+            if ($report.runner.dDrivePresent) {
+              $report.runner.dDriveType = [IO.DriveInfo]::new('D:\').DriveType.ToString()
+            }
+            if ($env:DESTINATION_KIND -ceq 'd-custom' -and
+              (-not $report.runner.dDrivePresent -or $report.runner.dDriveType -cne 'Fixed')) {
+              throw "d-custom requires an available fixed D: drive; observed '$($report.runner.dDriveType)'."
+            }
+            Save-SmokeReport
+
+            $apiHeaders = @{
+              Authorization = "Bearer $env:GH_TOKEN"
+              Accept = 'application/vnd.github+json'
+              'X-GitHub-Api-Version' = '2022-11-28'
+              'User-Agent' = 'LBL-Concrete-Designer-Installer-Smoke'
+            }
+
+            $stage = 'bind-release-and-asset'
+            $releaseApiUrl = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID"
+            $release = Invoke-RestMethod -Headers $apiHeaders -Uri $releaseApiUrl
+            if ([long]$release.id -ne [long]$env:RELEASE_ID) { throw 'GitHub returned a different release ID.' }
+            $expectedTag = "v$env:EXPECTED_VERSION"
+            if ([string]$release.tag_name -cne $expectedTag) {
+              throw "Release tag '$($release.tag_name)' does not match '$expectedTag'."
+            }
+            $report.release.tagName = [string]$release.tag_name
+            $report.release.draft = [bool]$release.draft
+            $report.release.prerelease = [bool]$release.prerelease
+            $report.release.targetCommitish = [string]$release.target_commitish
+
+            $releaseAssets = [Collections.Generic.List[object]]::new()
+            for ($page = 1; $page -le 100; $page += 1) {
+              $releaseAssetsUrl = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID/assets?per_page=100&page=$page"
+              $assetPage = @(Invoke-RestMethod -Headers $apiHeaders -Uri $releaseAssetsUrl)
+              foreach ($releaseAsset in $assetPage) { $releaseAssets.Add($releaseAsset) }
+              $report.release.assetPagesInspected = $page
+              if ($assetPage.Count -lt 100) { break }
+              if ($page -eq 100) { throw 'Release asset pagination exceeded the bounded 100-page limit.' }
+            }
+            $report.release.assetsInspected = $releaseAssets.Count
+            $matchingAssets = @($releaseAssets | Where-Object { [long]$_.id -eq [long]$env:ASSET_ID })
+            if ($matchingAssets.Count -ne 1) {
+              throw "Asset ID $env:ASSET_ID does not belong exactly once to release ID $env:RELEASE_ID."
+            }
+            $asset = $matchingAssets[0]
+            $assetName = "LBL-Concrete-Designer-Setup-$env:EXPECTED_VERSION.exe"
+            if ([string]$asset.name -cne $assetName) { throw "Release asset name mismatch for $assetName." }
+            if ([string]$asset.state -cne 'uploaded') { throw "Release asset is not uploaded: $($asset.state)." }
+            if ([long]$asset.size -le 0) { throw 'Release asset is empty.' }
+            $expectedAssetApiUrl = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$env:ASSET_ID"
+            if ([string]$asset.url -cne $expectedAssetApiUrl) { throw 'Release asset API identity mismatch.' }
+            $report.asset.name = [string]$asset.name
+            $report.asset.bytes = [long]$asset.size
+            $report.asset.state = [string]$asset.state
+            $report.asset.apiUrl = [string]$asset.url
+            Save-SmokeReport
+
+            $stage = 'download-and-hash-installer'
+            $installerPath = Join-Path $env:RUNNER_TEMP $assetName
+            $downloadHeaders = $apiHeaders.Clone()
+            $downloadHeaders.Accept = 'application/octet-stream'
+            Invoke-WebRequest -Headers $downloadHeaders -Uri $asset.url -OutFile $installerPath
+            $actualHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToUpperInvariant()
+            $downloadedBytes = (Get-Item -LiteralPath $installerPath).Length
+            $report.paths.downloadedInstaller = $installerPath
+            $report.asset.downloadedBytes = [long]$downloadedBytes
+            $report.asset.sizeMatched = [long]$downloadedBytes -eq [long]$report.asset.bytes
+            $report.hash.actual = $actualHash
+            $report.hash.matched = $actualHash -ceq $report.hash.expected
+            if (-not $report.asset.sizeMatched) {
+              throw "Downloaded installer byte count is $downloadedBytes, expected $($report.asset.bytes)."
+            }
+            if (-not $report.hash.matched) { throw "Downloaded installer SHA-256 mismatch: $actualHash" }
+            Save-SmokeReport
+
+            $stage = 'select-install-destination'
+            $cDefaultRoot = [string]$report.destination.cDefaultRoot
+            $dCustomRoot = [string]$report.destination.dCustomRoot
+            if ($env:DESTINATION_KIND -ceq 'c-default') {
+              $installRoot = $cDefaultRoot
+              $oppositeRoot = $dCustomRoot
+              $installerArguments = @('/S')
+              $installerVerbatimArguments = ''
+            } elseif ($env:DESTINATION_KIND -ceq 'd-custom') {
+              $installRoot = $dCustomRoot
+              $oppositeRoot = $cDefaultRoot
+              $installerArguments = @()
+              # NSIS requires /D= to be the final raw parameter with no quotes,
+              # even when the absolute path contains spaces.
+              $installerVerbatimArguments = "/S /D=$installRoot"
+            } else {
+              throw "Unknown destination value: $env:DESTINATION_KIND"
+            }
+            $applicationPath = Join-Path $installRoot 'LBL Concrete Designer.exe'
+            $report.destination.installRoot = $installRoot
+            $report.destination.applicationPath = $applicationPath
+            $report.destination.oppositeRoot = $oppositeRoot
+            $report.paths.installRoot = $installRoot
+            $report.paths.applicationExecutable = $applicationPath
+            $report.destination.cDefaultRootExistedBefore = Test-Path -LiteralPath $cDefaultRoot
+            $report.destination.dCustomRootExistedBefore = Test-Path -LiteralPath $dCustomRoot
+            if ($report.destination.cDefaultRootExistedBefore -or $report.destination.dCustomRootExistedBefore) {
+              throw 'A known C: or D: install root unexpectedly exists before clean-install QA.'
+            }
+            $entriesBeforeInstall = @(Get-ExactUninstallEntries)
+            $report.registry.exactEntriesBeforeInstall = $entriesBeforeInstall.Count
+            if ($entriesBeforeInstall.Count -ne 0) { throw 'An exact uninstall entry exists before the clean-install QA.' }
+            $cleanRootsConfirmed = $true
+            $report.failureCleanup.eligible = $true
+            Save-SmokeReport
+
+            $stage = 'install'
+            $report.install.attempted = $true
+            Save-SmokeReport
+            $installProcess = Invoke-BoundedProcess -FilePath $installerPath -Arguments $installerArguments -VerbatimArguments $installerVerbatimArguments
+            $report.install.exitCode = $installProcess.ExitCode
+            if ($installProcess.ExitCode -ne 0) { throw "Installer exited with $($installProcess.ExitCode)." }
+            $report.install.processExitedZero = $true
+            Save-SmokeReport
+
+            $stage = 'verify-installed-application'
+            $discoveredApplications = @(Get-KnownApplicationPaths)
+            $report.paths.discoveredApplicationsAfterInstall = $discoveredApplications
+            $report.destination.oppositeRootAbsentAfterInstall = -not (Test-Path -LiteralPath $oppositeRoot)
+            if (-not $report.destination.oppositeRootAbsentAfterInstall) {
+              throw "Installer changed the unselected destination: $oppositeRoot"
+            }
+            if (-not (Test-Path -LiteralPath $applicationPath -PathType Leaf)) {
+              $diagnosticRoots = @((Join-Path $env:LOCALAPPDATA 'Programs'), 'D:\LBL Apps') |
+                Where-Object { Test-Path -LiteralPath $_ -PathType Container }
+              $foundApplications = @($diagnosticRoots | ForEach-Object {
+                Get-ChildItem -LiteralPath $_ -Filter 'LBL Concrete Designer.exe' -File -Recurse -ErrorAction SilentlyContinue |
+                  Select-Object -ExpandProperty FullName
+              })
+              Write-Host "Designer executables found under expected parent roots: $($foundApplications -join '; ')"
+              throw "Installed application is missing: $applicationPath"
+            }
+            $application = Get-Item -LiteralPath $applicationPath
+            $productVersion = [string]$application.VersionInfo.ProductVersion
+            $report.version.productVersion = $productVersion
+            $allowedProductVersions = @($env:EXPECTED_VERSION, "$env:EXPECTED_VERSION.0")
+            $report.version.matched = $allowedProductVersions -ccontains $productVersion
+            if (-not $report.version.matched) {
+              throw "Installed ProductVersion is '$productVersion', expected '$env:EXPECTED_VERSION'."
+            }
+
+            $namedUninstallEntries = @(Get-ExactUninstallEntries)
+            $report.registry.exactEntriesAfterInstall = $namedUninstallEntries.Count
+            if ($namedUninstallEntries.Count -ne 1) {
+              throw "Expected one exact uninstall entry, found $($namedUninstallEntries.Count)."
+            }
+            $recordedInstallLocation = [string]$namedUninstallEntries[0].InstallLocation
+            $report.registry.recordedInstallLocation = $recordedInstallLocation
+            if ([String]::IsNullOrWhiteSpace($recordedInstallLocation)) {
+              throw 'The exact uninstall entry has no InstallLocation.'
+            }
+            $report.registry.installLocationMatched =
+              [IO.Path]::GetFullPath($recordedInstallLocation).TrimEnd('\') -ieq
+              [IO.Path]::GetFullPath($installRoot).TrimEnd('\')
+            if (-not $report.registry.installLocationMatched) {
+              throw "Uninstall entry points to a different install root: $recordedInstallLocation"
+            }
+
+            $uninstaller = @(Get-ChildItem -LiteralPath $installRoot -Filter 'Uninstall*.exe' -File)
+            if ($uninstaller.Count -ne 1) { throw "Expected exactly one uninstaller, found $($uninstaller.Count)." }
+            $uninstallerPath = $uninstaller[0].FullName
+            $report.paths.uninstaller = $uninstallerPath
+            $report.registry.uninstallString = [string]$namedUninstallEntries[0].UninstallString
+            $report.registry.quietUninstallString = [string]$namedUninstallEntries[0].QuietUninstallString
+            if ([String]::IsNullOrWhiteSpace($report.registry.uninstallString) -or
+              [String]::IsNullOrWhiteSpace($report.registry.quietUninstallString)) {
+              throw 'The uninstall registry entry is missing its normal or quiet command.'
+            }
+            $registeredUninstall = Split-RegisteredCommand -Command $report.registry.uninstallString
+            $registeredQuietUninstall = Split-RegisteredCommand -Command $report.registry.quietUninstallString
+            $report.registry.registeredUninstallerExecutable = $registeredQuietUninstall.Executable
+            $report.registry.registeredQuietArguments = @($registeredQuietUninstall.Arguments)
+            $normalPathMatched = [IO.Path]::GetFullPath($registeredUninstall.Executable) -ieq [IO.Path]::GetFullPath($uninstallerPath)
+            $quietPathMatched = [IO.Path]::GetFullPath($registeredQuietUninstall.Executable) -ieq [IO.Path]::GetFullPath($uninstallerPath)
+            $quietArgumentText = ($registeredQuietUninstall.Arguments -join ' ')
+            $quietArgumentsMatched = $quietArgumentText -iin @('/S', '/currentuser /S')
+            $report.registry.registeredUninstallerMatched = $normalPathMatched -and $quietPathMatched -and $quietArgumentsMatched
+            if (-not $report.registry.registeredUninstallerMatched) {
+              throw 'Registered uninstall commands do not resolve to the exact supported silent uninstaller.'
+            }
+            $report.install.payloadAndRegistrationVerified = $true
+            $report.install.completed = $true
+            Save-SmokeReport
+
+            $stage = 'launch'
+            $report.launch.attempted = $true
+            Save-SmokeReport
+            $launchInfo = [Diagnostics.ProcessStartInfo]::new()
+            $launchInfo.FileName = $applicationPath
+            $launchInfo.UseShellExecute = $false
+            [void]$launchInfo.ArgumentList.Add('--disable-gpu')
+            $applicationProcess = [Diagnostics.Process]::Start($launchInfo)
+            Start-Sleep -Seconds $report.launch.smokeSeconds
+            if ($applicationProcess.HasExited) {
+              $report.launch.earlyExitCode = [int]$applicationProcess.ExitCode
+              throw "Installed application exited during the smoke interval with $($applicationProcess.ExitCode)."
+            }
+            $running = @(Get-ExactApplicationProcesses -ApplicationPath $applicationPath)
+            $report.launch.exactProcessCount = $running.Count
+            $report.launch.remainedAliveDuringSmoke = $running.Count -ge 1
+            if (-not $report.launch.remainedAliveDuringSmoke) {
+              throw 'No installed application process remained alive for the smoke interval.'
+            }
+            foreach ($entry in $running) {
+              Stop-Process -Id $entry.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+            $report.launch.stoppedProcessCount = $running.Count
+            $stopDeadline = [DateTime]::UtcNow.AddSeconds(15)
+            do {
+              Start-Sleep -Milliseconds 250
+              $runningAfterStop = @(Get-ExactApplicationProcesses -ApplicationPath $applicationPath)
+            } while ($runningAfterStop.Count -gt 0 -and [DateTime]::UtcNow -lt $stopDeadline)
+            $report.launch.exactProcessesAfterStop = $runningAfterStop.Count
+            if ($runningAfterStop.Count -ne 0) { throw 'Installed application processes remain after the bounded stop.' }
+            Save-SmokeReport
+
+            $stage = 'uninstall'
+            $report.uninstall.attempted = $true
+            Save-SmokeReport
+            $uninstallProcess = Invoke-BoundedProcess -FilePath $uninstallerPath -Arguments @($registeredQuietUninstall.Arguments)
+            $report.uninstall.exitCode = $uninstallProcess.ExitCode
+            if ($uninstallProcess.ExitCode -ne 0) { throw "Uninstaller exited with $($uninstallProcess.ExitCode)." }
+            $report.uninstall.processExitedZero = $true
+
+            $stage = 'verify-cleanup'
+            $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(45)
+            do {
+              $remainingEntries = @(Get-ExactUninstallEntries)
+              $remainingProcesses = @(Get-ExactApplicationProcesses -ApplicationPath $applicationPath)
+              $applicationAbsent = -not (Test-Path -LiteralPath $applicationPath)
+              $installRootAbsent = -not (Test-Path -LiteralPath $installRoot)
+              if ($applicationAbsent -and $installRootAbsent -and $remainingEntries.Count -eq 0 -and $remainingProcesses.Count -eq 0) {
+                break
+              }
+              Start-Sleep -Milliseconds 250
+            } while ([DateTime]::UtcNow -lt $cleanupDeadline)
+
+            $report.registry.exactEntriesAfterUninstall = $remainingEntries.Count
+            $report.cleanup.applicationExecutableAbsent = $applicationAbsent
+            $report.cleanup.installRootAbsent = $installRootAbsent
+            $report.cleanup.uninstallRegistryAbsent = $remainingEntries.Count -eq 0
+            $report.cleanup.applicationProcessesAbsent = $remainingProcesses.Count -eq 0
+            if (-not $report.cleanup.applicationExecutableAbsent) { throw 'Application executable remains after silent uninstall.' }
+            if (-not $report.cleanup.installRootAbsent) { throw 'Install root remains after silent uninstall.' }
+            if (-not $report.cleanup.uninstallRegistryAbsent) { throw 'Uninstall registry entry remains after silent uninstall.' }
+            if (-not $report.cleanup.applicationProcessesAbsent) { throw 'Application process remains after silent uninstall.' }
+            $report.uninstall.cleanupVerified = $true
+            $report.uninstall.completed = $true
+
+            $report.failure = $null
+            $report.ok = $true
+            $report.completedAtUtc = [DateTime]::UtcNow.ToString('o')
+            Save-SmokeReport
+            "Installer smoke passed for $env:DESTINATION_KIND at $installRoot" |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          } catch {
+            $primaryFailure = $_
+            $report.ok = $false
+            $report.completedAtUtc = [DateTime]::UtcNow.ToString('o')
+            $report.failure = [ordered]@{
+              stage = $stage
+              message = $primaryFailure.Exception.Message
+              type = $primaryFailure.Exception.GetType().FullName
+            }
+            try {
+              Invoke-BestEffortFailureCleanup
+            } catch {
+              $cleanupErrors = @($report.failureCleanup.errors)
+              $report.failureCleanup.errors = @($cleanupErrors + "failure cleanup crashed: $($_.Exception.Message)")
+            }
+            Save-SmokeReport
+            "Installer smoke failed at stage '$stage': $($primaryFailure.Exception.Message)" |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+            throw $primaryFailure
+          }
+
+      - name: Upload installer smoke evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-smoke-${{ inputs.destination }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\installer-smoke-result.json
+          if-no-files-found: error
+          retention-days: 30
