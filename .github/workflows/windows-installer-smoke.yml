@@ -19,6 +19,14 @@ on:
         description: Expected uppercase SHA-256 of the installer
         required: true
         type: string
+      destination:
+        description: Clean-install destination exercised by this run
+        required: true
+        default: c-default
+        type: choice
+        options:
+          - c-default
+          - d-custom
 
 permissions:
   # Draft release assets are owner-only resources. The ephemeral GITHUB_TOKEN
@@ -27,15 +35,9 @@ permissions:
 
 jobs:
   clean-install:
-    name: Clean install on ${{ matrix.destination }}
+    name: Clean install on ${{ inputs.destination }}
     runs-on: windows-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        destination:
-          - c-default
-          - d-custom
     steps:
       - name: Download and authenticate the exact draft asset
         shell: pwsh
@@ -70,7 +72,7 @@ jobs:
       - name: Install, launch, and uninstall
         shell: pwsh
         env:
-          DESTINATION_KIND: ${{ matrix.destination }}
+          DESTINATION_KIND: ${{ inputs.destination }}
           EXPECTED_VERSION: ${{ inputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
