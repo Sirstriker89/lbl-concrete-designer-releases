@@ -79,12 +79,17 @@ jobs:
             param(
               [Parameter(Mandatory = $true)][string]$FilePath,
               [string[]]$Arguments = @(),
+              [string]$VerbatimArguments = '',
               [int]$TimeoutMilliseconds = 300000
             )
             $start = [Diagnostics.ProcessStartInfo]::new()
             $start.FileName = $FilePath
             $start.UseShellExecute = $false
-            foreach ($argument in $Arguments) { [void]$start.ArgumentList.Add($argument) }
+            if (-not [String]::IsNullOrWhiteSpace($VerbatimArguments)) {
+              $start.Arguments = $VerbatimArguments
+            } else {
+              foreach ($argument in $Arguments) { [void]$start.ArgumentList.Add($argument) }
+            }
             $process = [Diagnostics.Process]::Start($start)
             if (-not $process.WaitForExit($TimeoutMilliseconds)) {
               try { $process.Kill($true) } catch { }
@@ -96,15 +101,19 @@ jobs:
           if ($env:DESTINATION_KIND -ceq 'c-default') {
             $installRoot = Join-Path $env:LOCALAPPDATA 'Programs\LBL Concrete Designer'
             $installerArguments = @('/S')
+            $installerVerbatimArguments = ''
           } elseif ($env:DESTINATION_KIND -ceq 'd-custom') {
             $installRoot = 'D:\LBL Apps\LBL Concrete Designer'
-            $installerArguments = @('/S', "/D=$installRoot")
+            $installerArguments = @()
+            # NSIS requires /D= to be the final raw parameter with no quotes,
+            # even when the absolute path contains spaces.
+            $installerVerbatimArguments = "/S /D=$installRoot"
           } else {
             throw "Unknown destination matrix value: $env:DESTINATION_KIND"
           }
 
           if (Test-Path -LiteralPath $installRoot) { throw "Install root unexpectedly exists before QA: $installRoot" }
-          Invoke-BoundedProcess -FilePath $env:INSTALLER_PATH -Arguments $installerArguments
+          Invoke-BoundedProcess -FilePath $env:INSTALLER_PATH -Arguments $installerArguments -VerbatimArguments $installerVerbatimArguments
 
           $namedUninstallEntries = @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
             Where-Object { $_.DisplayName -ceq 'LBL Concrete Designer' })
@@ -152,10 +161,13 @@ jobs:
           if ($uninstaller.Count -ne 1) { throw "Expected exactly one uninstaller, found $($uninstaller.Count)." }
           Invoke-BoundedProcess -FilePath $uninstaller[0].FullName -Arguments @('/S')
           $deadline = [DateTime]::UtcNow.AddSeconds(30)
-          while ((Test-Path -LiteralPath $applicationPath) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 250 }
+          do {
+            $remainingEntries = @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
+              Where-Object { $_.DisplayName -ceq 'LBL Concrete Designer' })
+            if (-not (Test-Path -LiteralPath $applicationPath) -and $remainingEntries.Count -eq 0) { break }
+            Start-Sleep -Milliseconds 250
+          } while ([DateTime]::UtcNow -lt $deadline)
           if (Test-Path -LiteralPath $applicationPath) { throw 'Application executable remains after silent uninstall.' }
-          $remainingEntries = @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayName -ceq 'LBL Concrete Designer' })
           if ($remainingEntries.Count -ne 0) { throw 'Uninstall registry entry remains after silent uninstall.' }
 
           "Installer smoke passed for $env:DESTINATION_KIND at $installRoot" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
