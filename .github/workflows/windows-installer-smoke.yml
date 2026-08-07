@@ -106,16 +106,33 @@ jobs:
           if (Test-Path -LiteralPath $installRoot) { throw "Install root unexpectedly exists before QA: $installRoot" }
           Invoke-BoundedProcess -FilePath $env:INSTALLER_PATH -Arguments $installerArguments
 
+          $namedUninstallEntries = @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -ceq 'LBL Concrete Designer' })
+          Write-Host "Exact uninstall entries after install: $($namedUninstallEntries.Count)"
+          foreach ($entry in $namedUninstallEntries) {
+            Write-Host "InstallLocation='$([string]$entry.InstallLocation)' DisplayIcon='$([string]$entry.DisplayIcon)' UninstallString='$([string]$entry.UninstallString)'"
+          }
+
           $applicationPath = Join-Path $installRoot 'LBL Concrete Designer.exe'
-          if (-not (Test-Path -LiteralPath $applicationPath -PathType Leaf)) { throw "Installed application is missing: $applicationPath" }
+          if (-not (Test-Path -LiteralPath $applicationPath -PathType Leaf)) {
+            $diagnosticRoots = @((Join-Path $env:LOCALAPPDATA 'Programs'), 'D:\LBL Apps') | Where-Object { Test-Path -LiteralPath $_ -PathType Container }
+            $foundApplications = @($diagnosticRoots | ForEach-Object {
+              Get-ChildItem -LiteralPath $_ -Filter 'LBL Concrete Designer.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+            })
+            Write-Host "Designer executables found under expected parent roots: $($foundApplications -join '; ')"
+            throw "Installed application is missing: $applicationPath"
+          }
           $application = Get-Item -LiteralPath $applicationPath
           if (-not $application.VersionInfo.ProductVersion.StartsWith($env:EXPECTED_VERSION, [StringComparison]::Ordinal)) {
             throw "Installed ProductVersion is $($application.VersionInfo.ProductVersion), expected $env:EXPECTED_VERSION."
           }
 
-          $uninstallEntries = @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayName -ceq 'LBL Concrete Designer' -and [IO.Path]::GetFullPath($_.InstallLocation).TrimEnd('\') -ieq [IO.Path]::GetFullPath($installRoot).TrimEnd('\') })
-          if ($uninstallEntries.Count -ne 1) { throw "Expected one exact uninstall entry, found $($uninstallEntries.Count)." }
+          if ($namedUninstallEntries.Count -ne 1) { throw "Expected one exact uninstall entry, found $($namedUninstallEntries.Count)." }
+          $recordedInstallLocation = [string]$namedUninstallEntries[0].InstallLocation
+          if (-not [String]::IsNullOrWhiteSpace($recordedInstallLocation) -and
+            [IO.Path]::GetFullPath($recordedInstallLocation).TrimEnd('\') -ine [IO.Path]::GetFullPath($installRoot).TrimEnd('\')) {
+            throw "Uninstall entry points to a different install root: $recordedInstallLocation"
+          }
 
           $launch = [Diagnostics.ProcessStartInfo]::new()
           $launch.FileName = $applicationPath
