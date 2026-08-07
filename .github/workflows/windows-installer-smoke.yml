@@ -17,7 +17,9 @@ on:
         type: string
 
 permissions:
-  contents: read
+  # Draft release assets are owner-only resources. The ephemeral GITHUB_TOKEN
+  # needs Contents write to read and download the exact unpublished asset.
+  contents: write
 
 jobs:
   clean-install:
