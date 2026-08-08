@@ -730,7 +730,7 @@ jobs:
               $report.bootstrap.resultBytes = $resultBound.Bytes
               $report.bootstrap.resultSha256 = $resultBound.Sha256
               $report.bootstrap.resultBase64 = $resultBound.Base64
-              $bootstrapConfig = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+              $bootstrapConfig = Get-Content -LiteralPath $configPath -Raw -Encoding Unicode | ConvertFrom-Json
               $bootstrapResult = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
               Assert-ExactJsonKeys -Value $bootstrapConfig -Expected @(
                 'schemaVersion', 'sourceInstallerPath', 'relocatedInstallerPath', 'expectedSha256',
