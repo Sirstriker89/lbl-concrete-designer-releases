@@ -1,0 +1,936 @@
+name: LBL Concrete Designer installer upgrade
+on:
+  workflow_dispatch:
+    inputs:
+      old_release_id:
+        description: Exact published legacy release ID
+        required: true
+        type: string
+      old_asset_id:
+        description: Exact legacy installer asset ID
+        required: true
+        type: string
+      old_version:
+        description: Legacy version exercised by this run
+        required: true
+        type: choice
+        options:
+          - 0.8.7
+      old_sha256:
+        description: Expected uppercase SHA-256 of the legacy installer
+        required: true
+        type: string
+      new_release_id:
+        description: Exact draft 0.8.8 release ID
+        required: true
+        type: string
+      new_asset_id:
+        description: Exact draft 0.8.8 installer asset ID
+        required: true
+        type: string
+      new_version:
+        description: Candidate version exercised by this run
+        required: true
+        default: 0.8.8
+        type: choice
+        options:
+          - 0.8.8
+      new_sha256:
+        description: Expected uppercase SHA-256 of the candidate installer
+        required: true
+        type: string
+      scenario:
+        description: Standard installed upgrade or exact legacy-tree relocation path
+        required: true
+        default: standard
+        type: choice
+        options:
+          - standard
+          - legacy-tree-relocation
+      destination:
+        description: Existing installation location preserved by the upgrade
+        required: true
+        default: c-default
+        type: choice
+        options:
+          - c-default
+          - d-custom
+permissions:
+  # The candidate is an unpublished draft asset, so the ephemeral token needs
+  # release-asset read access through the repository contents permission.
+  contents: write
+jobs:
+  installer-upgrade:
+    name: Upgrade ${{ inputs.old_version }} to ${{ inputs.new_version }} on ${{ inputs.destination }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Install legacy, seed durable data, upgrade in place, relaunch, and clean up
+        id: upgrade
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OLD_RELEASE_ID: ${{ inputs.old_release_id }}
+          OLD_ASSET_ID: ${{ inputs.old_asset_id }}
+          OLD_VERSION: ${{ inputs.old_version }}
+          OLD_SHA256: ${{ inputs.old_sha256 }}
+          NEW_RELEASE_ID: ${{ inputs.new_release_id }}
+          NEW_ASSET_ID: ${{ inputs.new_asset_id }}
+          NEW_VERSION: ${{ inputs.new_version }}
+          NEW_SHA256: ${{ inputs.new_sha256 }}
+          UPGRADE_SCENARIO: ${{ inputs.scenario }}
+          DESTINATION_KIND: ${{ inputs.destination }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $upgradeMechanism = 'explicit-installer-in-place-upgrade-no-auto-updater'
+          $configurationSeedBase64 = 'eyJraW5kIjoiY29uZmlndXJhdGlvbi1zZWVkIiwic2NoZW1hVmVyc2lvbiI6MSwic2VudGluZWwiOiJMQkwtVVBHUkFERS1DT05GSUdVUkFUSU9OLVYxIn0K'
+          $recoverySeedBase64 = 'eyJraW5kIjoicmVjb3Zlcnktc2VlZCIsInNjaGVtYVZlcnNpb24iOjEsInNlbnRpbmVsIjoiTEJMLVVQR1JBREUtUkVDT1ZFUlktVjEifQo='
+          $configurationSeedSha256 = '1EB50A6548BD5A9F402A43AEF3036EBE0F7732AC002F49BFCB2466E4F3872794'
+          $recoverySeedSha256 = 'B286931EE96734531F54E60CF54B2626596F203B13C30DAF0B6F1401BF4D7654'
+          $migrationManifestSha256 = '3AD482640F9B4C054B350FE130159EA8AACA8EBBE24D21D6E75FA6F09521C4F9'
+          $reportPath = Join-Path $env:RUNNER_TEMP 'installer-upgrade-result.json'
+          $report = [ordered]@{
+            schemaVersion = 1
+            kind = 'lbl-concrete-designer-external-installer-upgrade-run'
+            product = 'LBL Concrete Designer'
+            repository = $env:GITHUB_REPOSITORY
+            generatedAtUtc = [DateTime]::UtcNow.ToString('o')
+            completedAtUtc = $null
+            workflow = [ordered]@{
+              runId = [long]$env:GITHUB_RUN_ID
+              runAttempt = [int]$env:GITHUB_RUN_ATTEMPT
+              job = $env:GITHUB_JOB
+              workflowHeadSha = $env:GITHUB_SHA
+              sourceCommitBindingClaimed = $false
+            }
+            runner = [ordered]@{
+              os = $env:RUNNER_OS
+              arch = $env:RUNNER_ARCH
+              dDrivePresent = Test-Path -LiteralPath 'D:\'
+              dDriveType = $null
+            }
+            journey = [ordered]@{
+              legacyVersion = $env:OLD_VERSION
+              candidateVersion = $env:NEW_VERSION
+              scenario = $env:UPGRADE_SCENARIO
+              destination = $env:DESTINATION_KIND
+            }
+            scope = [ordered]@{
+              mechanism = $upgradeMechanism
+              autoUpdaterExercised = $false
+              legacyInstallerLaunched = $false
+              candidateInstallerLaunched = $false
+              silentInstallerMode = $true
+              relocationBootstrapExercised = $false
+              visibleUiAssertion = $false
+            }
+            destination = [ordered]@{
+              kind = $env:DESTINATION_KIND
+              installRoot = $null
+              oppositeRoot = $null
+              cDefaultRoot = Join-Path $env:LOCALAPPDATA 'Programs\LBL Concrete Designer'
+              dCustomRoot = 'D:\LBL Apps\LBL Concrete Designer'
+              stableDataRoot = Join-Path $env:LOCALAPPDATA 'LBL Concrete Designer'
+              cDefaultRootExistedBefore = $null
+              dCustomRootExistedBefore = $null
+              stableDataRootExistedBefore = $null
+              oppositeRootAbsentAfterLegacyInstall = $false
+              oppositeRootAbsentAfterUpgrade = $false
+            }
+            legacy = [ordered]@{
+              release = [ordered]@{ inputId = $env:OLD_RELEASE_ID; id = $null; tagName = $null; draft = $null; prerelease = $null }
+              asset = [ordered]@{ inputId = $env:OLD_ASSET_ID; id = $null; name = $null; bytes = $null; downloadedBytes = $null; sizeMatched = $false; state = $null }
+              version = [ordered]@{ expected = $env:OLD_VERSION; observed = $null; matched = $false }
+              hash = [ordered]@{ algorithm = 'SHA-256'; expected = $env:OLD_SHA256.ToUpperInvariant(); actual = $null; matched = $false }
+            }
+            candidate = [ordered]@{
+              release = [ordered]@{ inputId = $env:NEW_RELEASE_ID; id = $null; tagName = $null; draft = $null; prerelease = $null }
+              asset = [ordered]@{ inputId = $env:NEW_ASSET_ID; id = $null; name = $null; bytes = $null; downloadedBytes = $null; sizeMatched = $false; state = $null }
+              version = [ordered]@{ expected = $env:NEW_VERSION; observed = $null; matched = $false }
+              hash = [ordered]@{ algorithm = 'SHA-256'; expected = $env:NEW_SHA256.ToUpperInvariant(); actual = $null; matched = $false }
+            }
+            paths = [ordered]@{
+              legacyInstaller = $null
+              candidateDownloadedInstaller = $null
+              candidateInvokedInstaller = $null
+              installRoot = $null
+              applicationExecutable = $null
+              uninstaller = $null
+              stableDataRoot = $null
+              legacyDataRoot = $null
+              configurationSeedBefore = $null
+              configurationSeedAfter = $null
+              recoverySeedBefore = $null
+              recoverySeedAfter = $null
+            }
+            installLegacy = [ordered]@{
+              attempted = $false
+              processStarted = $false
+              exitCode = $null
+              processExitedZero = $false
+              payloadAndRegistrationVerified = $false
+              completed = $false
+            }
+            legacyTransition = [ordered]@{
+              scenario = $env:UPGRADE_SCENARIO
+              legacyTreeInjected = $false
+              legacyTreeRoot = $null
+              candidateSourceInsideLegacyTree = $false
+              candidateSourceBytes = $null
+              candidateSourceSha256 = $null
+              candidateSourceMatched = $false
+              initialInstallerProcessId = $null
+              initialInstallerExitCode = $null
+              initialExitCodeMatched = $false
+              relocationScheduled = $false
+            }
+            seededData = [ordered]@{
+              sourceKind = $null
+              stableDataRootCreated = $false
+              configuration = [ordered]@{
+                relativePath = 'configuration/upgrade-contract-configuration-v1.json'
+                beforeAbsolutePath = $null
+                afterAbsolutePath = $null
+                bytesBeforeUpgrade = $null
+                sha256BeforeUpgrade = $null
+                bytesAfterUpgrade = $null
+                sha256AfterUpgrade = $null
+                preservedByteExact = $false
+              }
+              recovery = [ordered]@{
+                relativePath = 'recovery/upgrade-contract-recovery-v1.json'
+                beforeAbsolutePath = $null
+                afterAbsolutePath = $null
+                bytesBeforeUpgrade = $null
+                sha256BeforeUpgrade = $null
+                bytesAfterUpgrade = $null
+                sha256AfterUpgrade = $null
+                preservedByteExact = $false
+              }
+            }
+            upgrade = [ordered]@{
+              attempted = $false
+              mechanism = $upgradeMechanism
+              initialProcessStarted = $false
+              finalInstallerExitCode = $null
+              finalInstallerSucceeded = $false
+              applicationPathPreserved = $false
+              installLocationPreserved = $false
+              payloadVersionReplaced = $false
+              completed = $false
+            }
+            registry = [ordered]@{
+              exactEntriesBeforeLegacyInstall = $null
+              exactEntriesAfterLegacyInstall = $null
+              exactEntriesAfterUpgrade = $null
+              exactEntriesAfterUninstall = $null
+              installLocationBeforeUpgrade = $null
+              installLocationAfterUpgrade = $null
+              installLocationPreserved = $false
+              registeredUninstallerAfterUpgrade = $null
+              registeredQuietArguments = @()
+              registeredUninstallerMatched = $false
+            }
+            bootstrap = [ordered]@{
+              required = $false
+              configPath = $null
+              readyPath = $null
+              resultPath = $null
+              configObserved = $false
+              readyObserved = $false
+              resultObserved = $false
+              configBytes = $null
+              configSha256 = $null
+              configBase64 = $null
+              resultBytes = $null
+              resultSha256 = $null
+              resultBase64 = $null
+              applicationProcessesBeforeExplicitRelaunch = $null
+            }
+            migration = [ordered]@{
+              required = $false
+              receiptPath = $null
+              observed = $false
+              receiptBytes = $null
+              receiptSha256 = $null
+              receiptBase64 = $null
+            }
+            relaunch = [ordered]@{
+              attempted = $false
+              applicationPath = $null
+              expectedVersion = $env:NEW_VERSION
+              observedVersion = $null
+              versionMatched = $false
+              smokeSeconds = 8
+              exactProcessCount = 0
+              remainedAliveDuringSmoke = $false
+              earlyExitCode = $null
+              stoppedProcessCount = 0
+              exactProcessesAfterStop = $null
+            }
+            uninstall = [ordered]@{
+              attempted = $false
+              processStarted = $false
+              exitCode = $null
+              processExitedZero = $false
+              cleanupVerified = $false
+              completed = $false
+            }
+            cleanup = [ordered]@{
+              applicationExecutableAbsent = $false
+              installRootAbsent = $false
+              uninstallRegistryAbsent = $false
+              applicationProcessesAbsent = $false
+              seedFilesAbsent = $false
+              stableDataRootAbsent = $false
+              legacyDataRootAbsent = $false
+              bootstrapArtifactsAbsent = $false
+              cDefaultRootAbsent = $false
+              dCustomRootAbsent = $false
+              legacyDownloadedInstallerAbsent = $false
+              candidateDownloadedInstallerAbsent = $false
+            }
+            failureCleanup = [ordered]@{ eligible = $false; attempted = $false; errors = @() }
+            failure = $null
+            ok = $false
+          }
+          function Save-UpgradeReport {
+            $json = $script:report | ConvertTo-Json -Depth 12
+            [IO.File]::WriteAllText($script:reportPath, "$json`n", [Text.UTF8Encoding]::new($false))
+          }
+          function Invoke-BoundedProcess {
+            param(
+              [Parameter(Mandatory = $true)][string]$FilePath,
+              [string[]]$Arguments = @(),
+              [string]$VerbatimArguments = '',
+              [int]$TimeoutMilliseconds = 300000
+            )
+            $start = [Diagnostics.ProcessStartInfo]::new()
+            $start.FileName = $FilePath
+            $start.UseShellExecute = $false
+            $start.CreateNoWindow = $true
+            $start.WorkingDirectory = $env:RUNNER_TEMP
+            if (-not [String]::IsNullOrWhiteSpace($VerbatimArguments)) {
+              $start.Arguments = $VerbatimArguments
+            } else {
+              foreach ($argument in $Arguments) { [void]$start.ArgumentList.Add($argument) }
+            }
+            $process = [Diagnostics.Process]::Start($start)
+            if (-not $process) { throw "Process did not start: $FilePath" }
+            if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+              try { $process.Kill($true) } catch { }
+              throw "Process timed out: $FilePath"
+            }
+            return [pscustomobject]@{ ProcessStarted = $true; ProcessId = [int]$process.Id; ExitCode = [int]$process.ExitCode }
+          }
+          function Get-ExactUninstallEntries {
+            return @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
+              Where-Object { $_.DisplayName -ceq 'LBL Concrete Designer' })
+          }
+          function Get-ExactApplicationProcesses {
+            param([Parameter(Mandatory = $true)][string]$ApplicationPath)
+            return @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+              $_.ExecutablePath -and
+              [IO.Path]::GetFullPath($_.ExecutablePath) -ieq [IO.Path]::GetFullPath($ApplicationPath)
+            })
+          }
+          function Test-SamePath {
+            param([Parameter(Mandatory = $true)][string]$Left, [Parameter(Mandatory = $true)][string]$Right)
+            return [IO.Path]::GetFullPath($Left).TrimEnd('\') -ieq [IO.Path]::GetFullPath($Right).TrimEnd('\')
+          }
+          function Get-RunnerTempInstallerPath {
+            param([Parameter(Mandatory = $true)][string]$Version)
+            if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+              throw 'Runner-temp installer version must be exact SemVer.'
+            }
+            $runnerTempRoot = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')
+            $installerPath = [IO.Path]::GetFullPath((Join-Path $runnerTempRoot "LBL-Concrete-Designer-Setup-$Version.exe"))
+            if ([IO.Path]::GetDirectoryName($installerPath).TrimEnd('\') -ine $runnerTempRoot) {
+              throw 'Runner-temp installer escaped the confirmed temporary root.'
+            }
+            return $installerPath
+          }
+          function Remove-RunnerTempInstaller {
+            param([Parameter(Mandatory = $true)][string]$Version)
+            $installerPath = Get-RunnerTempInstallerPath -Version $Version
+            if (Test-Path -LiteralPath $installerPath) {
+              if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
+                throw "Runner-temp installer target is not a file: $installerPath"
+              }
+              Remove-Item -LiteralPath $installerPath -Force
+            }
+            if (Test-Path -LiteralPath $installerPath) {
+              throw "Runner-temp installer remains after cleanup: $installerPath"
+            }
+            return $true
+          }
+          function Split-RegisteredCommand {
+            param([Parameter(Mandatory = $true)][string]$Command)
+            if (-not $Command.StartsWith('"', [StringComparison]::Ordinal)) {
+              throw 'Registered command must quote its executable path.'
+            }
+            $closingQuote = $Command.IndexOf('"', 1)
+            if ($closingQuote -le 1) { throw 'Registered command has invalid quoting.' }
+            $executable = $Command.Substring(1, $closingQuote - 1)
+            $argumentText = $Command.Substring($closingQuote + 1).Trim()
+            $arguments = if ([String]::IsNullOrWhiteSpace($argumentText)) {
+              @()
+            } else {
+              @($argumentText -split '\s+' | Where-Object { -not [String]::IsNullOrWhiteSpace($_) })
+            }
+            return [pscustomobject]@{ Executable = $executable; Arguments = $arguments }
+          }
+          function Get-InstallerInvocation {
+            param([Parameter(Mandatory = $true)][string]$DestinationKind, [Parameter(Mandatory = $true)][string]$InstallRoot)
+            if ($DestinationKind -ceq 'c-default') {
+              return [pscustomobject]@{ Arguments = @('/S'); VerbatimArguments = '' }
+            }
+            if ($DestinationKind -ceq 'd-custom') {
+              return [pscustomobject]@{ Arguments = @(); VerbatimArguments = "/S /D=$InstallRoot" }
+            }
+            throw "Unknown destination: $DestinationKind"
+          }
+          function Get-ProductVersion {
+            param([Parameter(Mandatory = $true)][string]$ApplicationPath, [Parameter(Mandatory = $true)][string]$ExpectedVersion)
+            if (-not (Test-Path -LiteralPath $ApplicationPath -PathType Leaf)) {
+              throw "Application executable is missing: $ApplicationPath"
+            }
+            $observed = [string](Get-Item -LiteralPath $ApplicationPath).VersionInfo.ProductVersion
+            if ($observed -cnotin @($ExpectedVersion, "$ExpectedVersion.0")) {
+              throw "ProductVersion '$observed' does not match '$ExpectedVersion'."
+            }
+            return $observed
+          }
+          function Bind-AndDownloadInstaller {
+            param(
+              [Parameter(Mandatory = $true)][long]$ReleaseId,
+              [Parameter(Mandatory = $true)][long]$AssetId,
+              [Parameter(Mandatory = $true)][string]$Version,
+              [Parameter(Mandatory = $true)][string]$ExpectedSha256,
+              [Parameter(Mandatory = $true)][bool]$ExpectedDraft,
+              [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Evidence
+            )
+            $releaseUrl = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/$ReleaseId"
+            $release = Invoke-RestMethod -Headers $script:apiHeaders -Uri $releaseUrl
+            if ([long]$release.id -ne $ReleaseId) { throw 'GitHub returned a different release ID.' }
+            if ([string]$release.tag_name -cne "v$Version") { throw 'Release tag mismatch.' }
+            if ([bool]$release.draft -ne $ExpectedDraft -or [bool]$release.prerelease) { throw 'Release state mismatch.' }
+            $assets = [Collections.Generic.List[object]]::new()
+            for ($page = 1; $page -le 100; $page += 1) {
+              $url = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/$ReleaseId/assets?per_page=100&page=$page"
+              $assetPage = @(Invoke-RestMethod -Headers $script:apiHeaders -Uri $url)
+              foreach ($entry in $assetPage) { $assets.Add($entry) }
+              if ($assetPage.Count -lt 100) { break }
+              if ($page -eq 100) { throw 'Release asset pagination exceeded the bounded limit.' }
+            }
+            $matches = @($assets | Where-Object { [long]$_.id -eq $AssetId })
+            if ($matches.Count -ne 1) { throw "Asset $AssetId does not belong exactly once to release $ReleaseId." }
+            $asset = $matches[0]
+            $assetName = "LBL-Concrete-Designer-Setup-$Version.exe"
+            if ([string]$asset.name -cne $assetName -or [string]$asset.state -cne 'uploaded' -or [long]$asset.size -le 0) {
+              throw "Installer asset identity is invalid for $Version."
+            }
+            $expectedApiUrl = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$AssetId"
+            if ([string]$asset.url -cne $expectedApiUrl) { throw 'Asset API identity mismatch.' }
+            $installerPath = Get-RunnerTempInstallerPath -Version $Version
+            $downloadHeaders = $script:apiHeaders.Clone()
+            $downloadHeaders.Accept = 'application/octet-stream'
+            Invoke-WebRequest -Headers $downloadHeaders -Uri $asset.url -OutFile $installerPath
+            $downloadedBytes = [long](Get-Item -LiteralPath $installerPath).Length
+            $actualHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToUpperInvariant()
+            $Evidence.release.id = $ReleaseId
+            $Evidence.release.tagName = [string]$release.tag_name
+            $Evidence.release.draft = [bool]$release.draft
+            $Evidence.release.prerelease = [bool]$release.prerelease
+            $Evidence.asset.id = $AssetId
+            $Evidence.asset.name = [string]$asset.name
+            $Evidence.asset.bytes = [long]$asset.size
+            $Evidence.asset.downloadedBytes = $downloadedBytes
+            $Evidence.asset.sizeMatched = $downloadedBytes -eq [long]$asset.size
+            $Evidence.asset.state = [string]$asset.state
+            $Evidence.hash.actual = $actualHash
+            $Evidence.hash.matched = $actualHash -ceq $ExpectedSha256.ToUpperInvariant()
+            if (-not $Evidence.asset.sizeMatched -or -not $Evidence.hash.matched) {
+              throw "Downloaded installer bytes or SHA-256 mismatch for $Version."
+            }
+            return $installerPath
+          }
+          function Set-SeedBeforeEvidence {
+            param(
+              [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Evidence,
+              [Parameter(Mandatory = $true)][string]$BeforeRoot,
+              [Parameter(Mandatory = $true)][string]$AfterRoot,
+              [Parameter(Mandatory = $true)][string]$Base64,
+              [Parameter(Mandatory = $true)][string]$ExpectedSha256
+            )
+            $absolutePath = Join-Path $BeforeRoot ($Evidence.relativePath.Replace('/', '\'))
+            $bytes = [Convert]::FromBase64String($Base64)
+            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($absolutePath)) | Out-Null
+            [IO.File]::WriteAllBytes($absolutePath, $bytes)
+            $observedBytes = [long](Get-Item -LiteralPath $absolutePath).Length
+            $observedHash = (Get-FileHash -LiteralPath $absolutePath -Algorithm SHA256).Hash.ToUpperInvariant()
+            if ($observedBytes -ne $bytes.Length -or $observedHash -cne $ExpectedSha256) { throw 'Seed write verification failed.' }
+            $Evidence.beforeAbsolutePath = $absolutePath
+            $Evidence.afterAbsolutePath = Join-Path $AfterRoot ($Evidence.relativePath.Replace('/', '\'))
+            $Evidence.bytesBeforeUpgrade = $observedBytes
+            $Evidence.sha256BeforeUpgrade = $observedHash
+          }
+          function Set-SeedAfterEvidence {
+            param(
+              [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Evidence,
+              [Parameter(Mandatory = $true)][long]$ExpectedBytes,
+              [Parameter(Mandatory = $true)][string]$ExpectedSha256
+            )
+            if (-not (Test-Path -LiteralPath $Evidence.afterAbsolutePath -PathType Leaf)) { throw 'Seed disappeared during upgrade.' }
+            $Evidence.bytesAfterUpgrade = [long](Get-Item -LiteralPath $Evidence.afterAbsolutePath).Length
+            $Evidence.sha256AfterUpgrade = (Get-FileHash -LiteralPath $Evidence.afterAbsolutePath -Algorithm SHA256).Hash.ToUpperInvariant()
+            $Evidence.preservedByteExact =
+              $Evidence.bytesAfterUpgrade -eq $ExpectedBytes -and
+              $Evidence.sha256AfterUpgrade -ceq $ExpectedSha256 -and
+              $Evidence.bytesBeforeUpgrade -eq $Evidence.bytesAfterUpgrade -and
+              $Evidence.sha256BeforeUpgrade -ceq $Evidence.sha256AfterUpgrade
+            if (-not $Evidence.preservedByteExact) { throw 'Seed was not preserved byte-exact across upgrade.' }
+          }
+          function Get-BoundFileEvidence {
+            param([Parameter(Mandatory = $true)][string]$Path)
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Evidence file is missing: $Path" }
+            $bytes = [IO.File]::ReadAllBytes($Path)
+            return [pscustomobject]@{
+              Bytes = [long]$bytes.Length
+              Sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+              Base64 = [Convert]::ToBase64String($bytes)
+            }
+          }
+          function Assert-ExactJsonKeys {
+            param(
+              [Parameter(Mandatory = $true)]$Value,
+              [Parameter(Mandatory = $true)][string[]]$Expected,
+              [Parameter(Mandatory = $true)][string]$Label
+            )
+            $actual = @($Value.PSObject.Properties.Name)
+            $unknown = @($actual | Where-Object { $_ -cnotin $Expected })
+            $missing = @($Expected | Where-Object { $_ -cnotin $actual })
+            if ($unknown.Count -ne 0 -or $missing.Count -ne 0) { throw "$Label has unknown or missing JSON keys." }
+          }
+          function Invoke-BestEffortFailureCleanup {
+            $script:report.failureCleanup.eligible = $script:cleanRootsConfirmed
+            if (-not $script:cleanRootsConfirmed) { return }
+            $script:report.failureCleanup.attempted = $true
+            $errors = [Collections.Generic.List[string]]::new()
+            foreach ($root in @($script:report.destination.cDefaultRoot, $script:report.destination.dCustomRoot)) {
+              $application = Join-Path $root 'LBL Concrete Designer.exe'
+              try {
+                foreach ($process in @(Get-ExactApplicationProcesses -ApplicationPath $application)) {
+                  Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+                }
+              } catch { $errors.Add("process cleanup: $($_.Exception.Message)") }
+              if (Test-Path -LiteralPath $root -PathType Container) {
+                foreach ($candidate in @(Get-ChildItem -LiteralPath $root -Filter 'Uninstall*.exe' -File -ErrorAction SilentlyContinue)) {
+                  try { [void](Invoke-BoundedProcess -FilePath $candidate.FullName -Arguments @('/currentuser', '/S') -TimeoutMilliseconds 120000) }
+                  catch { $errors.Add("uninstaller cleanup: $($_.Exception.Message)") }
+                }
+              }
+            }
+            try {
+              if (Test-Path -LiteralPath $script:report.destination.stableDataRoot) {
+                Remove-Item -LiteralPath $script:report.destination.stableDataRoot -Recurse -Force
+              }
+            } catch { $errors.Add("data cleanup: $($_.Exception.Message)") }
+            try {
+              $script:report.cleanup.legacyDownloadedInstallerAbsent =
+                Remove-RunnerTempInstaller -Version $env:OLD_VERSION
+            } catch { $errors.Add("legacy downloaded installer cleanup: $($_.Exception.Message)") }
+            try {
+              $script:report.cleanup.candidateDownloadedInstallerAbsent =
+                Remove-RunnerTempInstaller -Version $env:NEW_VERSION
+            } catch { $errors.Add("candidate downloaded installer cleanup: $($_.Exception.Message)") }
+            $script:report.failureCleanup.errors = @($errors)
+          }
+          Save-UpgradeReport
+          $cleanRootsConfirmed = $false
+          $stage = 'validate-inputs'
+          try {
+            if ($env:OLD_RELEASE_ID -notmatch '^\d+$' -or $env:OLD_ASSET_ID -notmatch '^\d+$' -or
+                $env:NEW_RELEASE_ID -notmatch '^\d+$' -or $env:NEW_ASSET_ID -notmatch '^\d+$') {
+              throw 'Release and asset IDs must be positive decimal integers.'
+            }
+            if ($env:OLD_VERSION -cne '0.8.7' -or $env:NEW_VERSION -cne '0.8.8') {
+              throw 'Only the 0.8.7 to 0.8.8 contract is accepted.'
+            }
+            if ($env:UPGRADE_SCENARIO -cnotin @('standard', 'legacy-tree-relocation')) {
+              throw 'Unknown upgrade scenario.'
+            }
+            if ($env:OLD_SHA256 -notmatch '^[A-Fa-f0-9]{64}$' -or $env:NEW_SHA256 -notmatch '^[A-Fa-f0-9]{64}$') {
+              throw 'Installer SHA-256 input is invalid.'
+            }
+            if ([long]$env:OLD_RELEASE_ID -eq [long]$env:NEW_RELEASE_ID -or [long]$env:OLD_ASSET_ID -eq [long]$env:NEW_ASSET_ID) {
+              throw 'Legacy and candidate release/asset identities must be distinct.'
+            }
+            $report.legacy.release.id = [long]$env:OLD_RELEASE_ID
+            $report.legacy.asset.id = [long]$env:OLD_ASSET_ID
+            $report.candidate.release.id = [long]$env:NEW_RELEASE_ID
+            $report.candidate.asset.id = [long]$env:NEW_ASSET_ID
+            if ($report.runner.dDrivePresent) { $report.runner.dDriveType = [IO.DriveInfo]::new('D:\').DriveType.ToString() }
+            if (-not $report.runner.dDrivePresent -or $report.runner.dDriveType -cne 'Fixed') {
+              throw "A fixed D: drive is required by the four-run contract; observed '$($report.runner.dDriveType)'."
+            }
+            $apiHeaders = @{
+              Authorization = "Bearer $env:GH_TOKEN"
+              Accept = 'application/vnd.github+json'
+              'X-GitHub-Api-Version' = '2022-11-28'
+              'User-Agent' = 'LBL-Concrete-Designer-Installer-Upgrade'
+            }
+            $stage = 'select-clean-destination'
+            $cRoot = [string]$report.destination.cDefaultRoot
+            $dRoot = [string]$report.destination.dCustomRoot
+            $stableDataRoot = [string]$report.destination.stableDataRoot
+            if ($env:DESTINATION_KIND -ceq 'c-default') { $installRoot = $cRoot; $oppositeRoot = $dRoot }
+            elseif ($env:DESTINATION_KIND -ceq 'd-custom') { $installRoot = $dRoot; $oppositeRoot = $cRoot }
+            else { throw "Unknown destination: $env:DESTINATION_KIND" }
+            $applicationPath = Join-Path $installRoot 'LBL Concrete Designer.exe'
+            $legacyDataRoot = Join-Path $installRoot '.lbl-concrete-designer-data'
+            $report.destination.installRoot = $installRoot
+            $report.destination.oppositeRoot = $oppositeRoot
+            $report.paths.installRoot = $installRoot
+            $report.paths.applicationExecutable = $applicationPath
+            $report.paths.stableDataRoot = $stableDataRoot
+            $report.paths.legacyDataRoot = $legacyDataRoot
+            $report.legacyTransition.legacyTreeRoot = $legacyDataRoot
+            $report.destination.cDefaultRootExistedBefore = Test-Path -LiteralPath $cRoot
+            $report.destination.dCustomRootExistedBefore = Test-Path -LiteralPath $dRoot
+            $report.destination.stableDataRootExistedBefore = Test-Path -LiteralPath $stableDataRoot
+            if ($report.destination.cDefaultRootExistedBefore -or $report.destination.dCustomRootExistedBefore -or
+                $report.destination.stableDataRootExistedBefore) {
+              throw 'Known install/data roots must all be absent before upgrade QA.'
+            }
+            $entriesBefore = @(Get-ExactUninstallEntries)
+            $report.registry.exactEntriesBeforeLegacyInstall = $entriesBefore.Count
+            if ($entriesBefore.Count -ne 0) { throw 'An exact uninstall entry exists before legacy install.' }
+            $cleanRootsConfirmed = $true
+            $report.failureCleanup.eligible = $true
+            Save-UpgradeReport
+            $stage = 'bind-and-download-installers'
+            $legacyInstallerPath = Bind-AndDownloadInstaller `
+              -ReleaseId ([long]$env:OLD_RELEASE_ID) -AssetId ([long]$env:OLD_ASSET_ID) `
+              -Version $env:OLD_VERSION -ExpectedSha256 $env:OLD_SHA256 -ExpectedDraft $false -Evidence $report.legacy
+            $candidateInstallerPath = Bind-AndDownloadInstaller `
+              -ReleaseId ([long]$env:NEW_RELEASE_ID) -AssetId ([long]$env:NEW_ASSET_ID) `
+              -Version $env:NEW_VERSION -ExpectedSha256 $env:NEW_SHA256 -ExpectedDraft $true -Evidence $report.candidate
+            $report.paths.legacyInstaller = $legacyInstallerPath
+            $report.paths.candidateDownloadedInstaller = $candidateInstallerPath
+            Save-UpgradeReport
+            $invocation = Get-InstallerInvocation -DestinationKind $env:DESTINATION_KIND -InstallRoot $installRoot
+            $stage = 'install-legacy'
+            $report.installLegacy.attempted = $true
+            Save-UpgradeReport
+            $legacyResult = Invoke-BoundedProcess -FilePath $legacyInstallerPath `
+              -Arguments $invocation.Arguments -VerbatimArguments $invocation.VerbatimArguments
+            $report.scope.legacyInstallerLaunched = $true
+            $report.installLegacy.processStarted = $legacyResult.ProcessStarted
+            $report.installLegacy.exitCode = $legacyResult.ExitCode
+            if ($legacyResult.ExitCode -ne 0) { throw "Legacy installer exited with $($legacyResult.ExitCode)." }
+            $report.installLegacy.processExitedZero = $true
+            $stage = 'verify-legacy-install'
+            $legacyVersion = Get-ProductVersion -ApplicationPath $applicationPath -ExpectedVersion $env:OLD_VERSION
+            $report.legacy.version.observed = $legacyVersion
+            $report.legacy.version.matched = $true
+            $legacyEntries = @(Get-ExactUninstallEntries)
+            $report.registry.exactEntriesAfterLegacyInstall = $legacyEntries.Count
+            if ($legacyEntries.Count -ne 1) { throw "Expected one registry entry after legacy install, found $($legacyEntries.Count)." }
+            $legacyLocation = [string]$legacyEntries[0].InstallLocation
+            if ([String]::IsNullOrWhiteSpace($legacyLocation) -or -not (Test-SamePath -Left $legacyLocation -Right $installRoot)) {
+              throw 'Legacy InstallLocation does not match the selected root.'
+            }
+            $report.registry.installLocationBeforeUpgrade = $legacyLocation
+            $report.destination.oppositeRootAbsentAfterLegacyInstall = -not (Test-Path -LiteralPath $oppositeRoot)
+            if (-not $report.destination.oppositeRootAbsentAfterLegacyInstall) { throw 'Legacy installer changed the opposite root.' }
+            $report.installLegacy.payloadAndRegistrationVerified = $true
+            $report.installLegacy.completed = $true
+            Save-UpgradeReport
+            $stage = 'seed-durable-data'
+            $relocationScenario = $env:UPGRADE_SCENARIO -ceq 'legacy-tree-relocation'
+            if ($relocationScenario) {
+              $seedRoot = $legacyDataRoot
+              $candidateInvokedPath = Join-Path $legacyDataRoot "work\updates\$([IO.Path]::GetFileName($candidateInstallerPath))"
+              [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($candidateInvokedPath)) | Out-Null
+              Copy-Item -LiteralPath $candidateInstallerPath -Destination $candidateInvokedPath
+              $report.seededData.sourceKind = 'legacy-installed-adjacent'
+              $report.legacyTransition.legacyTreeInjected = $true
+              $report.legacyTransition.candidateSourceInsideLegacyTree = $true
+              $report.scope.relocationBootstrapExercised = $true
+              $report.bootstrap.required = $true
+              $report.migration.required = $true
+            } else {
+              $seedRoot = $stableDataRoot
+              $candidateInvokedPath = $candidateInstallerPath
+              $report.seededData.sourceKind = 'stable-per-user'
+            }
+            $candidateSourceBytes = [long](Get-Item -LiteralPath $candidateInvokedPath).Length
+            $candidateSourceSha256 = (Get-FileHash -LiteralPath $candidateInvokedPath -Algorithm SHA256).Hash.ToUpperInvariant()
+            $report.paths.candidateInvokedInstaller = $candidateInvokedPath
+            $report.legacyTransition.candidateSourceBytes = $candidateSourceBytes
+            $report.legacyTransition.candidateSourceSha256 = $candidateSourceSha256
+            $report.legacyTransition.candidateSourceMatched =
+              $candidateSourceBytes -eq [long]$report.candidate.asset.bytes -and
+              $candidateSourceSha256 -ceq $report.candidate.hash.expected
+            if (-not $report.legacyTransition.candidateSourceMatched) { throw 'Invoked candidate is not byte-exact.' }
+            Set-SeedBeforeEvidence -Evidence $report.seededData.configuration -BeforeRoot $seedRoot -AfterRoot $stableDataRoot `
+              -Base64 $configurationSeedBase64 -ExpectedSha256 $configurationSeedSha256
+            Set-SeedBeforeEvidence -Evidence $report.seededData.recovery -BeforeRoot $seedRoot -AfterRoot $stableDataRoot `
+              -Base64 $recoverySeedBase64 -ExpectedSha256 $recoverySeedSha256
+            $report.paths.configurationSeedBefore = $report.seededData.configuration.beforeAbsolutePath
+            $report.paths.configurationSeedAfter = $report.seededData.configuration.afterAbsolutePath
+            $report.paths.recoverySeedBefore = $report.seededData.recovery.beforeAbsolutePath
+            $report.paths.recoverySeedAfter = $report.seededData.recovery.afterAbsolutePath
+            Save-UpgradeReport
+            $stage = 'explicit-installer-upgrade'
+            $report.upgrade.attempted = $true
+            Save-UpgradeReport
+            $candidateResult = Invoke-BoundedProcess -FilePath $candidateInvokedPath `
+              -Arguments $invocation.Arguments -VerbatimArguments $invocation.VerbatimArguments
+            $report.scope.candidateInstallerLaunched = $true
+            $report.upgrade.initialProcessStarted = $candidateResult.ProcessStarted
+            $report.legacyTransition.initialInstallerProcessId = $candidateResult.ProcessId
+            $report.legacyTransition.initialInstallerExitCode = $candidateResult.ExitCode
+            $expectedInitialExit = if ($relocationScenario) { 42 } else { 0 }
+            $report.legacyTransition.initialExitCodeMatched = $candidateResult.ExitCode -eq $expectedInitialExit
+            if (-not $report.legacyTransition.initialExitCodeMatched) {
+              throw "Initial candidate installer exit is $($candidateResult.ExitCode), expected $expectedInitialExit."
+            }
+            $report.legacyTransition.relocationScheduled = $relocationScenario
+            if ($relocationScenario) {
+              $stage = 'verify-relocation-bootstrap-before-relaunch'
+              $pidText = [string]$candidateResult.ProcessId
+              $configPath = Join-Path $stableDataRoot "work\installer-bootstrap\c-$pidText.json"
+              $readyPath = Join-Path $stableDataRoot "work\installer-bootstrap\r-$pidText"
+              $resultPath = Join-Path $stableDataRoot 'work\updates\update-bootstrap-result.json'
+              $report.bootstrap.configPath = $configPath
+              $report.bootstrap.readyPath = $readyPath
+              $report.bootstrap.resultPath = $resultPath
+              $report.bootstrap.readyObserved = Test-Path -LiteralPath $readyPath -PathType Leaf
+              if (-not $report.bootstrap.readyObserved) { throw 'Relocation exit 42 lacks its PID-specific ready marker.' }
+              $resultDeadline = [DateTime]::UtcNow.AddMinutes(10)
+              while (-not (Test-Path -LiteralPath $resultPath -PathType Leaf) -and [DateTime]::UtcNow -lt $resultDeadline) {
+                Start-Sleep -Milliseconds 500
+              }
+              $report.bootstrap.configObserved = Test-Path -LiteralPath $configPath -PathType Leaf
+              $report.bootstrap.resultObserved = Test-Path -LiteralPath $resultPath -PathType Leaf
+              if (-not $report.bootstrap.configObserved -or -not $report.bootstrap.resultObserved) {
+                throw 'Relocation bootstrap config/result evidence is missing.'
+              }
+              $configBound = Get-BoundFileEvidence -Path $configPath
+              $resultBound = Get-BoundFileEvidence -Path $resultPath
+              $report.bootstrap.configBytes = $configBound.Bytes
+              $report.bootstrap.configSha256 = $configBound.Sha256
+              $report.bootstrap.configBase64 = $configBound.Base64
+              $report.bootstrap.resultBytes = $resultBound.Bytes
+              $report.bootstrap.resultSha256 = $resultBound.Sha256
+              $report.bootstrap.resultBase64 = $resultBound.Base64
+              $bootstrapConfig = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+              $bootstrapResult = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+              Assert-ExactJsonKeys -Value $bootstrapConfig -Expected @(
+                'schemaVersion', 'sourceInstallerPath', 'relocatedInstallerPath', 'expectedSha256',
+                'applicationPath', 'installRoot', 'stableRoot', 'externalTempRoot', 'resultPath',
+                'readyPath', 'installerProcessId', 'targetVersion', 'installerSilent'
+              ) -Label 'bootstrap config'
+              Assert-ExactJsonKeys -Value $bootstrapResult -Expected @(
+                'schemaVersion', 'targetVersion', 'installerSha256', 'status',
+                'installerExitCode', 'completedAt', 'message'
+              ) -Label 'bootstrap result'
+              if ([int]$bootstrapConfig.schemaVersion -ne 2 -or $bootstrapConfig.installerSilent -ne $true -or
+                  [int]$bootstrapConfig.installerProcessId -ne $candidateResult.ProcessId -or
+                  [string]$bootstrapConfig.expectedSha256 -cne $report.candidate.hash.expected) {
+                throw 'Bootstrap config does not prove strict boolean silent mode.'
+              }
+              if ([int]$bootstrapResult.schemaVersion -ne 1 -or [string]$bootstrapResult.status -cne 'succeeded' -or
+                  [int]$bootstrapResult.installerExitCode -ne 0 -or
+                  [string]$bootstrapResult.installerSha256 -cne $report.candidate.hash.expected) {
+                throw 'Relocated silent installer did not complete successfully.'
+              }
+              $report.upgrade.finalInstallerExitCode = [int]$bootstrapResult.installerExitCode
+            } else {
+              $report.upgrade.finalInstallerExitCode = $candidateResult.ExitCode
+            }
+            $report.bootstrap.applicationProcessesBeforeExplicitRelaunch =
+              @(Get-ExactApplicationProcesses -ApplicationPath $applicationPath).Count
+            if ($report.bootstrap.applicationProcessesBeforeExplicitRelaunch -ne 0) {
+              throw 'Silent installer or bootstrap relaunched the application unexpectedly.'
+            }
+            $report.upgrade.finalInstallerSucceeded = $report.upgrade.finalInstallerExitCode -eq 0
+            if (-not $report.upgrade.finalInstallerSucceeded) { throw 'Final installer did not exit with 0.' }
+            $stage = 'verify-upgraded-payload-location-and-data'
+            $candidateVersion = Get-ProductVersion -ApplicationPath $applicationPath -ExpectedVersion $env:NEW_VERSION
+            $report.candidate.version.observed = $candidateVersion
+            $report.candidate.version.matched = $true
+            $report.upgrade.applicationPathPreserved = Test-Path -LiteralPath $applicationPath -PathType Leaf
+            $upgradedEntries = @(Get-ExactUninstallEntries)
+            $report.registry.exactEntriesAfterUpgrade = $upgradedEntries.Count
+            if ($upgradedEntries.Count -ne 1) { throw "Expected one registry entry after upgrade, found $($upgradedEntries.Count)." }
+            $upgradedLocation = [string]$upgradedEntries[0].InstallLocation
+            $report.registry.installLocationAfterUpgrade = $upgradedLocation
+            $report.registry.installLocationPreserved =
+              -not [String]::IsNullOrWhiteSpace($upgradedLocation) -and
+              (Test-SamePath -Left $legacyLocation -Right $upgradedLocation) -and
+              (Test-SamePath -Left $upgradedLocation -Right $installRoot)
+            $report.upgrade.installLocationPreserved = $report.registry.installLocationPreserved
+            if (-not $report.registry.installLocationPreserved) { throw 'InstallLocation changed during upgrade.' }
+            $report.destination.oppositeRootAbsentAfterUpgrade = -not (Test-Path -LiteralPath $oppositeRoot)
+            if (-not $report.destination.oppositeRootAbsentAfterUpgrade) { throw 'Candidate installer changed the opposite root.' }
+            $report.seededData.stableDataRootCreated = Test-Path -LiteralPath $stableDataRoot -PathType Container
+            if (-not $report.seededData.stableDataRootCreated) { throw 'Stable durable data root is missing after upgrade.' }
+            Set-SeedAfterEvidence -Evidence $report.seededData.configuration `
+              -ExpectedBytes 90 -ExpectedSha256 $configurationSeedSha256
+            Set-SeedAfterEvidence -Evidence $report.seededData.recovery `
+              -ExpectedBytes 80 -ExpectedSha256 $recoverySeedSha256
+            if ($relocationScenario) {
+              $receiptPath = Join-Path $stableDataRoot 'configuration\installed-data-migration-v083.json'
+              $report.migration.receiptPath = $receiptPath
+              $report.migration.observed = Test-Path -LiteralPath $receiptPath -PathType Leaf
+              if (-not $report.migration.observed) { throw 'Installed-data migration receipt is missing.' }
+              $receiptBound = Get-BoundFileEvidence -Path $receiptPath
+              $report.migration.receiptBytes = $receiptBound.Bytes
+              $report.migration.receiptSha256 = $receiptBound.Sha256
+              $report.migration.receiptBase64 = $receiptBound.Base64
+              $receipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
+              Assert-ExactJsonKeys -Value $receipt -Expected @(
+                'schemaVersion', 'kind', 'sourceContract', 'sourceRoot', 'stableRoot',
+                'durableDirectories', 'excludedDirectories', 'files', 'bytes', 'copiedFiles',
+                'reusedIdenticalFiles', 'manifestSha256', 'completedAt'
+              ) -Label 'migration receipt'
+              if ([int]$receipt.schemaVersion -ne 1 -or [int]$receipt.files -ne 2 -or
+                  [long]$receipt.bytes -ne 170 -or [int]$receipt.copiedFiles -ne 2 -or
+                  [int]$receipt.reusedIdenticalFiles -ne 0 -or
+                  [string]$receipt.manifestSha256 -cne $migrationManifestSha256) {
+                throw 'Migration receipt does not describe exactly both known seed files.'
+              }
+            }
+            $uninstallers = @(Get-ChildItem -LiteralPath $installRoot -Filter 'Uninstall*.exe' -File)
+            if ($uninstallers.Count -ne 1) { throw "Expected one uninstaller after upgrade, found $($uninstallers.Count)." }
+            $uninstallerPath = $uninstallers[0].FullName
+            $quiet = Split-RegisteredCommand -Command ([string]$upgradedEntries[0].QuietUninstallString)
+            $report.paths.uninstaller = $uninstallerPath
+            $report.registry.registeredUninstallerAfterUpgrade = $quiet.Executable
+            $report.registry.registeredQuietArguments = @($quiet.Arguments)
+            $report.registry.registeredUninstallerMatched =
+              (Test-SamePath -Left $quiet.Executable -Right $uninstallerPath) -and
+              (($quiet.Arguments -join ' ').ToLowerInvariant() -ceq '/currentuser /s')
+            if (-not $report.registry.registeredUninstallerMatched) { throw 'Registered quiet uninstaller changed or is unsafe.' }
+            $report.upgrade.payloadVersionReplaced = $env:OLD_VERSION -cne $env:NEW_VERSION -and $report.candidate.version.matched
+            if (-not $report.upgrade.applicationPathPreserved -or -not $report.upgrade.payloadVersionReplaced) {
+              throw 'Upgraded payload identity is incomplete.'
+            }
+            $report.upgrade.completed = $true
+            Save-UpgradeReport
+            $stage = 'relaunch-upgraded-application'
+            $report.relaunch.attempted = $true
+            $report.relaunch.applicationPath = $applicationPath
+            $report.relaunch.observedVersion = $candidateVersion
+            $report.relaunch.versionMatched = $report.candidate.version.matched
+            Save-UpgradeReport
+            $launchInfo = [Diagnostics.ProcessStartInfo]::new()
+            $launchInfo.FileName = $applicationPath
+            $launchInfo.UseShellExecute = $false
+            [void]$launchInfo.ArgumentList.Add('--disable-gpu')
+            $launched = [Diagnostics.Process]::Start($launchInfo)
+            if (-not $launched) { throw 'Upgraded application did not start.' }
+            Start-Sleep -Seconds $report.relaunch.smokeSeconds
+            if ($launched.HasExited) {
+              $report.relaunch.earlyExitCode = [int]$launched.ExitCode
+              throw "Upgraded application exited early with $($launched.ExitCode)."
+            }
+            $running = @(Get-ExactApplicationProcesses -ApplicationPath $applicationPath)
+            $report.relaunch.exactProcessCount = $running.Count
+            $report.relaunch.remainedAliveDuringSmoke = $running.Count -ge 1
+            if (-not $report.relaunch.remainedAliveDuringSmoke) { throw 'No upgraded application process remained alive.' }
+            foreach ($process in $running) { Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop }
+            $report.relaunch.stoppedProcessCount = $running.Count
+            $stopDeadline = [DateTime]::UtcNow.AddSeconds(15)
+            do {
+              Start-Sleep -Milliseconds 250
+              $afterStop = @(Get-ExactApplicationProcesses -ApplicationPath $applicationPath)
+            } while ($afterStop.Count -gt 0 -and [DateTime]::UtcNow -lt $stopDeadline)
+            $report.relaunch.exactProcessesAfterStop = $afterStop.Count
+            if ($afterStop.Count -ne 0) { throw 'Application processes remain after bounded stop.' }
+            Save-UpgradeReport
+            $stage = 'uninstall-upgraded-application'
+            $report.uninstall.attempted = $true
+            Save-UpgradeReport
+            $uninstallResult = Invoke-BoundedProcess -FilePath $uninstallerPath -Arguments @($quiet.Arguments)
+            $report.uninstall.processStarted = $uninstallResult.ProcessStarted
+            $report.uninstall.exitCode = $uninstallResult.ExitCode
+            if ($uninstallResult.ExitCode -ne 0) { throw "Uninstaller exited with $($uninstallResult.ExitCode)." }
+            $report.uninstall.processExitedZero = $true
+            $stage = 'verify-and-finish-cleanup'
+            $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(45)
+            do {
+              $remainingEntries = @(Get-ExactUninstallEntries)
+              $remainingProcesses = @(Get-ExactApplicationProcesses -ApplicationPath $applicationPath)
+              $applicationAbsent = -not (Test-Path -LiteralPath $applicationPath)
+              $installRootAbsent = -not (Test-Path -LiteralPath $installRoot)
+              if ($applicationAbsent -and $installRootAbsent -and $remainingEntries.Count -eq 0 -and $remainingProcesses.Count -eq 0) { break }
+              Start-Sleep -Milliseconds 250
+            } while ([DateTime]::UtcNow -lt $cleanupDeadline)
+            $report.registry.exactEntriesAfterUninstall = $remainingEntries.Count
+            $report.cleanup.applicationExecutableAbsent = $applicationAbsent
+            $report.cleanup.installRootAbsent = $installRootAbsent
+            $report.cleanup.uninstallRegistryAbsent = $remainingEntries.Count -eq 0
+            $report.cleanup.applicationProcessesAbsent = $remainingProcesses.Count -eq 0
+            if (-not $applicationAbsent -or -not $installRootAbsent -or $remainingEntries.Count -ne 0 -or $remainingProcesses.Count -ne 0) {
+              throw 'Silent uninstall did not clean payload, registry, and processes.'
+            }
+            $stage = 'remove-downloaded-installers'
+            $report.cleanup.legacyDownloadedInstallerAbsent =
+              Remove-RunnerTempInstaller -Version $env:OLD_VERSION
+            $report.cleanup.candidateDownloadedInstallerAbsent =
+              Remove-RunnerTempInstaller -Version $env:NEW_VERSION
+            if (Test-Path -LiteralPath $stableDataRoot) { Remove-Item -LiteralPath $stableDataRoot -Recurse -Force }
+            $report.cleanup.seedFilesAbsent =
+              -not (Test-Path -LiteralPath $report.paths.configurationSeedAfter) -and
+              -not (Test-Path -LiteralPath $report.paths.recoverySeedAfter)
+            $report.cleanup.stableDataRootAbsent = -not (Test-Path -LiteralPath $stableDataRoot)
+            $report.cleanup.legacyDataRootAbsent = -not (Test-Path -LiteralPath $legacyDataRoot)
+            $report.cleanup.bootstrapArtifactsAbsent =
+              -not (Test-Path -LiteralPath (Join-Path $stableDataRoot 'work\installer-bootstrap')) -and
+              -not (Test-Path -LiteralPath (Join-Path $stableDataRoot 'work\updates\update-bootstrap-result.json'))
+            $report.cleanup.cDefaultRootAbsent = -not (Test-Path -LiteralPath $cRoot)
+            $report.cleanup.dCustomRootAbsent = -not (Test-Path -LiteralPath $dRoot)
+            if (-not $report.cleanup.seedFilesAbsent -or -not $report.cleanup.stableDataRootAbsent -or
+                -not $report.cleanup.legacyDataRootAbsent -or -not $report.cleanup.bootstrapArtifactsAbsent -or
+                -not $report.cleanup.cDefaultRootAbsent -or -not $report.cleanup.dCustomRootAbsent -or
+                -not $report.cleanup.legacyDownloadedInstallerAbsent -or
+                -not $report.cleanup.candidateDownloadedInstallerAbsent) {
+              throw 'Known clean roots remain after test cleanup.'
+            }
+            $report.uninstall.cleanupVerified = $true
+            $report.uninstall.completed = $true
+            $report.failure = $null
+            $report.ok = $true
+            $report.completedAtUtc = [DateTime]::UtcNow.ToString('o')
+            Save-UpgradeReport
+            "Explicit installer upgrade passed: $env:OLD_VERSION -> $env:NEW_VERSION on $env:DESTINATION_KIND. Auto-updater was not exercised." |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          } catch {
+            $primaryFailure = $_
+            $report.ok = $false
+            $report.completedAtUtc = [DateTime]::UtcNow.ToString('o')
+            $report.failure = [ordered]@{
+              stage = $stage
+              message = $primaryFailure.Exception.Message
+              type = $primaryFailure.Exception.GetType().FullName
+            }
+            try { Invoke-BestEffortFailureCleanup }
+            catch { $report.failureCleanup.errors = @($report.failureCleanup.errors + "failure cleanup crashed: $($_.Exception.Message)") }
+            Save-UpgradeReport
+            "Installer upgrade failed at '$stage': $($primaryFailure.Exception.Message)" |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+            throw $primaryFailure
+          }
+      - name: Upload installer upgrade evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-upgrade-${{ inputs.scenario }}-${{ inputs.destination }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\installer-upgrade-result.json
+          if-no-files-found: error
+          retention-days: 30
