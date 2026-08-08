@@ -90,6 +90,8 @@ jobs:
           $recoverySeedSha256 = 'B286931EE96734531F54E60CF54B2626596F203B13C30DAF0B6F1401BF4D7654'
           $migrationManifestSha256 = '3AD482640F9B4C054B350FE130159EA8AACA8EBBE24D21D6E75FA6F09521C4F9'
           $reportPath = Join-Path $env:RUNNER_TEMP 'installer-upgrade-result.json'
+          $bootstrapDiagnosticTail = ''
+          $diagnosticPath = $null
           $report = [ordered]@{
             schemaVersion = 1
             kind = 'lbl-concrete-designer-external-installer-upgrade-run'
@@ -311,6 +313,10 @@ jobs:
             $start.UseShellExecute = $false
             $start.CreateNoWindow = $true
             $start.WorkingDirectory = $env:RUNNER_TEMP
+            # Installers and uninstallers do not need repository credentials.
+            # Do not leak the workflow token into arbitrary child environments.
+            [void]$start.EnvironmentVariables.Remove('GH_TOKEN')
+            [void]$start.EnvironmentVariables.Remove('GITHUB_TOKEN')
             if (-not [String]::IsNullOrWhiteSpace($VerbatimArguments)) {
               $start.Arguments = $VerbatimArguments
             } else {
@@ -698,19 +704,49 @@ jobs:
             $report.legacyTransition.initialInstallerExitCode = $candidateResult.ExitCode
             $expectedInitialExit = if ($relocationScenario) { 42 } else { 0 }
             $report.legacyTransition.initialExitCodeMatched = $candidateResult.ExitCode -eq $expectedInitialExit
+            if ($relocationScenario) {
+              # Capture every relocation artifact before validating exit 42.
+              # Failure cleanup deletes stableDataRoot, so delaying this block
+              # would erase the only evidence for an early installer failure.
+              $pidText = [string]$candidateResult.ProcessId
+              $configPath = Join-Path $stableDataRoot "work\installer-bootstrap\c-$pidText.json"
+              $diagnosticPath = Join-Path $stableDataRoot "work\installer-bootstrap\d-$pidText.log"
+              $readyPath = Join-Path $stableDataRoot "work\installer-bootstrap\r-$pidText"
+              $resultPath = Join-Path $stableDataRoot 'work\updates\update-bootstrap-result.json'
+              $report.bootstrap.configPath = $configPath
+              $report.bootstrap.readyPath = $readyPath
+              $report.bootstrap.resultPath = $resultPath
+              $report.seededData.stableDataRootCreated = Test-Path -LiteralPath $stableDataRoot -PathType Container
+              $report.bootstrap.configObserved = Test-Path -LiteralPath $configPath -PathType Leaf
+              $report.bootstrap.readyObserved = Test-Path -LiteralPath $readyPath -PathType Leaf
+              $report.bootstrap.resultObserved = Test-Path -LiteralPath $resultPath -PathType Leaf
+              if ($report.bootstrap.configObserved) {
+                $configBound = Get-BoundFileEvidence -Path $configPath
+                $report.bootstrap.configBytes = $configBound.Bytes
+                $report.bootstrap.configSha256 = $configBound.Sha256
+                $report.bootstrap.configBase64 = $configBound.Base64
+              }
+              if ($report.bootstrap.resultObserved) {
+                $resultBound = Get-BoundFileEvidence -Path $resultPath
+                $report.bootstrap.resultBytes = $resultBound.Bytes
+                $report.bootstrap.resultSha256 = $resultBound.Sha256
+                $report.bootstrap.resultBase64 = $resultBound.Base64
+              }
+              if (Test-Path -LiteralPath $diagnosticPath -PathType Leaf) {
+                $bootstrapDiagnosticTail = [IO.File]::ReadAllText($diagnosticPath, [Text.Encoding]::UTF8)
+                if ($bootstrapDiagnosticTail.Length -gt 6000) {
+                  $bootstrapDiagnosticTail = $bootstrapDiagnosticTail.Substring($bootstrapDiagnosticTail.Length - 6000)
+                }
+                $bootstrapDiagnosticTail = $bootstrapDiagnosticTail -replace '[\r\n]+', ' | '
+              }
+              Save-UpgradeReport
+            }
             if (-not $report.legacyTransition.initialExitCodeMatched) {
               throw "Initial candidate installer exit is $($candidateResult.ExitCode), expected $expectedInitialExit."
             }
             $report.legacyTransition.relocationScheduled = $relocationScenario
             if ($relocationScenario) {
               $stage = 'verify-relocation-bootstrap-before-relaunch'
-              $pidText = [string]$candidateResult.ProcessId
-              $configPath = Join-Path $stableDataRoot "work\installer-bootstrap\c-$pidText.json"
-              $readyPath = Join-Path $stableDataRoot "work\installer-bootstrap\r-$pidText"
-              $resultPath = Join-Path $stableDataRoot 'work\updates\update-bootstrap-result.json'
-              $report.bootstrap.configPath = $configPath
-              $report.bootstrap.readyPath = $readyPath
-              $report.bootstrap.resultPath = $resultPath
               $report.bootstrap.readyObserved = Test-Path -LiteralPath $readyPath -PathType Leaf
               if (-not $report.bootstrap.readyObserved) { throw 'Relocation exit 42 lacks its PID-specific ready marker.' }
               $resultDeadline = [DateTime]::UtcNow.AddMinutes(10)
@@ -917,9 +953,24 @@ jobs:
             $primaryFailure = $_
             $report.ok = $false
             $report.completedAtUtc = [DateTime]::UtcNow.ToString('o')
+            try {
+              if (-not [String]::IsNullOrWhiteSpace($diagnosticPath) -and
+                  (Test-Path -LiteralPath $diagnosticPath -PathType Leaf)) {
+                $bootstrapDiagnosticTail = [IO.File]::ReadAllText($diagnosticPath, [Text.Encoding]::UTF8)
+                if ($bootstrapDiagnosticTail.Length -gt 6000) {
+                  $bootstrapDiagnosticTail = $bootstrapDiagnosticTail.Substring($bootstrapDiagnosticTail.Length - 6000)
+                }
+                $bootstrapDiagnosticTail = $bootstrapDiagnosticTail -replace '[\r\n]+', ' | '
+              }
+            } catch { }
+            $failureMessage = $primaryFailure.Exception.Message
+            if (-not [String]::IsNullOrWhiteSpace($bootstrapDiagnosticTail)) {
+              $failureMessage += " Bootstrap diagnostic: $bootstrapDiagnosticTail"
+            }
+            if ($failureMessage.Length -gt 8000) { $failureMessage = $failureMessage.Substring(0, 8000) }
             $report.failure = [ordered]@{
               stage = $stage
-              message = $primaryFailure.Exception.Message
+              message = $failureMessage
               type = $primaryFailure.Exception.GetType().FullName
             }
             try { Invoke-BestEffortFailureCleanup }
