@@ -92,6 +92,10 @@ jobs:
           $reportPath = Join-Path $env:RUNNER_TEMP 'installer-upgrade-result.json'
           $bootstrapDiagnosticTail = ''
           $diagnosticPath = $null
+          $transcriptionPolicyPath = 'HKCU:\Software\Policies\Microsoft\Windows\PowerShell\Transcription'
+          $transcriptionRoot = Join-Path $env:RUNNER_TEMP "lbl-relocation-transcript-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $transcriptionPolicySnapshot = $null
+          $transcriptionPolicyEnabled = $false
           $report = [ordered]@{
             schemaVersion = 1
             kind = 'lbl-concrete-designer-external-installer-upgrade-run'
@@ -300,6 +304,75 @@ jobs:
           function Save-UpgradeReport {
             $json = $script:report | ConvertTo-Json -Depth 12
             [IO.File]::WriteAllText($script:reportPath, "$json`n", [Text.UTF8Encoding]::new($false))
+          }
+          function Disable-RelocationPowerShellTranscription {
+            if ($null -eq $script:transcriptionPolicySnapshot) { return }
+            $snapshot = $script:transcriptionPolicySnapshot
+            if ($snapshot.keyExisted) {
+              [void](New-Item -Path $script:transcriptionPolicyPath -Force)
+              foreach ($name in @('EnableTranscripting', 'EnableInvocationHeader', 'OutputDirectory')) {
+                $record = $snapshot.values[$name]
+                if ($record.present) {
+                  [void](New-ItemProperty -Path $script:transcriptionPolicyPath -Name $name `
+                    -Value $record.value -PropertyType $record.kind -Force)
+                } else {
+                  Remove-ItemProperty -Path $script:transcriptionPolicyPath -Name $name -ErrorAction SilentlyContinue
+                }
+              }
+            } elseif (Test-Path -LiteralPath $script:transcriptionPolicyPath) {
+              Remove-Item -LiteralPath $script:transcriptionPolicyPath -Force
+            }
+            $script:transcriptionPolicyEnabled = $false
+            $script:transcriptionPolicySnapshot = $null
+          }
+          function Enable-RelocationPowerShellTranscription {
+            if (Test-Path -LiteralPath $script:transcriptionRoot) {
+              throw 'The relocation transcription root already exists.'
+            }
+            [void](New-Item -ItemType Directory -Path $script:transcriptionRoot)
+            $keyExisted = Test-Path -LiteralPath $script:transcriptionPolicyPath
+            $existing = if ($keyExisted) { Get-ItemProperty -LiteralPath $script:transcriptionPolicyPath } else { $null }
+            $values = @{}
+            foreach ($name in @('EnableTranscripting', 'EnableInvocationHeader', 'OutputDirectory')) {
+              $present = $keyExisted -and ($existing.PSObject.Properties.Name -ccontains $name)
+              $values[$name] = [ordered]@{
+                present = $present
+                value = if ($present) { $existing.$name } else { $null }
+                kind = if ($present) { (Get-Item -LiteralPath $script:transcriptionPolicyPath).GetValueKind($name) } else { $null }
+              }
+            }
+            $script:transcriptionPolicySnapshot = [ordered]@{ keyExisted = $keyExisted; values = $values }
+            $script:transcriptionPolicyEnabled = $true
+            try {
+              [void](New-Item -Path $script:transcriptionPolicyPath -Force)
+              [void](New-ItemProperty -Path $script:transcriptionPolicyPath -Name EnableTranscripting -Value 1 -PropertyType DWord -Force)
+              [void](New-ItemProperty -Path $script:transcriptionPolicyPath -Name EnableInvocationHeader -Value 1 -PropertyType DWord -Force)
+              [void](New-ItemProperty -Path $script:transcriptionPolicyPath -Name OutputDirectory -Value $script:transcriptionRoot -PropertyType String -Force)
+            } catch {
+              try { Disable-RelocationPowerShellTranscription } catch { }
+              throw
+            }
+          }
+          function Get-RelocationPowerShellTranscriptTail {
+            if (-not (Test-Path -LiteralPath $script:transcriptionRoot -PathType Container)) { return '' }
+            $fragments = [Collections.Generic.List[string]]::new()
+            foreach ($file in @(Get-ChildItem -LiteralPath $script:transcriptionRoot -File -Recurse -ErrorAction SilentlyContinue |
+                Sort-Object -Property FullName | Select-Object -First 8)) {
+              try {
+                $tail = (Get-Content -LiteralPath $file.FullName -Tail 120 -ErrorAction Stop | Out-String)
+                if ($tail.Length -gt 6000) { $tail = $tail.Substring($tail.Length - 6000) }
+                $fragments.Add("[$($file.Name) bytes=$($file.Length)] $tail")
+              } catch {
+                $fragments.Add("[$($file.Name) unreadable]")
+              }
+            }
+            $combined = ($fragments -join "`n")
+            $combined = $combined -replace '(?i)gh[pousr]_[A-Za-z0-9_]{12,}', '[REDACTED_GITHUB_TOKEN]'
+            $combined = $combined -replace '(?i)github_pat_[A-Za-z0-9_]{12,}', '[REDACTED_GITHUB_TOKEN]'
+            $combined = $combined -replace '(?i)(Authorization\s*[:=]\s*Bearer\s+)\S+', '$1[REDACTED]'
+            $combined = $combined -replace '(?i)(password=)\S+', '$1[REDACTED]'
+            if ($combined.Length -gt 6000) { $combined = $combined.Substring($combined.Length - 6000) }
+            return $combined
           }
           function Invoke-BoundedProcess {
             param(
@@ -696,8 +769,25 @@ jobs:
             $stage = 'explicit-installer-upgrade'
             $report.upgrade.attempted = $true
             Save-UpgradeReport
-            $candidateResult = Invoke-BoundedProcess -FilePath $candidateInvokedPath `
-              -Arguments $invocation.Arguments -VerbatimArguments $invocation.VerbatimArguments
+            if ($relocationScenario) { Enable-RelocationPowerShellTranscription }
+            try {
+              $candidateResult = Invoke-BoundedProcess -FilePath $candidateInvokedPath `
+                -Arguments $invocation.Arguments -VerbatimArguments $invocation.VerbatimArguments
+            } finally {
+              if ($relocationScenario) {
+                try { Disable-RelocationPowerShellTranscription }
+                catch { $bootstrapDiagnosticTail += "Transcription policy restore error: $($_.Exception.Message)`n" }
+                try {
+                  $transcriptTail = Get-RelocationPowerShellTranscriptTail
+                  if (-not [String]::IsNullOrWhiteSpace($transcriptTail)) {
+                    $bootstrapDiagnosticTail += "PowerShell transcription: $transcriptTail"
+                  }
+                } catch {
+                  $bootstrapDiagnosticTail += "Transcription read error: $($_.Exception.Message)"
+                }
+                Remove-Item -LiteralPath $transcriptionRoot -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
             $report.scope.candidateInstallerLaunched = $true
             $report.upgrade.initialProcessStarted = $candidateResult.ProcessStarted
             $report.legacyTransition.initialInstallerProcessId = $candidateResult.ProcessId
