@@ -419,7 +419,10 @@ jobs:
             $assets = [Collections.Generic.List[object]]::new()
             for ($page = 1; $page -le 100; $page += 1) {
               $url = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/$ReleaseId/assets?per_page=100&page=$page"
-              $assetPage = @(Invoke-RestMethod -Headers $script:apiHeaders -Uri $url)
+              # Invoke-RestMethod can emit a JSON array as one no-enumerate
+              # System.Object[] object. Direct assignment lets foreach expand
+              # the asset objects instead of adding that array as one item.
+              $assetPage = Invoke-RestMethod -Headers $script:apiHeaders -Uri $url
               foreach ($entry in $assetPage) { $assets.Add($entry) }
               if ($assetPage.Count -lt 100) { break }
               if ($page -eq 100) { throw 'Release asset pagination exceeded the bounded limit.' }

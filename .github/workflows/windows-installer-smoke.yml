@@ -352,7 +352,10 @@ jobs:
             $releaseAssets = [Collections.Generic.List[object]]::new()
             for ($page = 1; $page -le 100; $page += 1) {
               $releaseAssetsUrl = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID/assets?per_page=100&page=$page"
-              $assetPage = @(Invoke-RestMethod -Headers $apiHeaders -Uri $releaseAssetsUrl)
+              # Invoke-RestMethod can emit a JSON array as one no-enumerate
+              # System.Object[] object. Direct assignment lets foreach expand
+              # the asset objects instead of adding that array as one item.
+              $assetPage = Invoke-RestMethod -Headers $apiHeaders -Uri $releaseAssetsUrl
               foreach ($releaseAsset in $assetPage) { $releaseAssets.Add($releaseAsset) }
               $report.release.assetPagesInspected = $page
               if ($assetPage.Count -lt 100) { break }
